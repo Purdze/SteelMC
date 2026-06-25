@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["bed_block","campfire_block","door_block","fence_block","hay_block","honey_block","lava_cauldron_block","magma_block","potent_sulfur_block","powder_snow_block","rotated_pillar_block","scaffolding_block","slab_block","slime_block","sponge_block","stair_block","weathering_block","wet_sponge_block"]};

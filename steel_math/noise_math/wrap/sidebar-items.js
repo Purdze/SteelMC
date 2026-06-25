@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HALF_ROUND_OFF","ROUND_OFF"],"fn":["wrap","wrap_4x","wrap_simd"]};

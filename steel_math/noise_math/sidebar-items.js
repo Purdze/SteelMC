@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GRADIENT"],"mod":["bias_towards_extreme","clamp","corner_noise_3d","cube","dot","floor","grad_dot","inverse_lerp","lerp","map","smoothstep","square","wrap"]};

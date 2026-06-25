@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["GenerationContext","GenerationStub","TerrainProbe"],"trait":["StructureGenerationContext"]};

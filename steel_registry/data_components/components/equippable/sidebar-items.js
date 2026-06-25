@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EquippableAllowedEntities"],"fn":["parse_allowed_entities_nbt","parse_allowed_entities_string","parse_identifier_nbt","push_hash_entry","read_allowed_entities","write_allowed_entities"],"struct":["Equippable"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ColumnBlock"],"mod":["generation","structure","structure_ref"]};

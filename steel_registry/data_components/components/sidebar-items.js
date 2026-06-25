@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EquippableAllowedEntities","ItemAttributeModifierDisplay"],"mod":["attribute_modifiers","combat","enchantments","equippable","tool"],"struct":["AttackRange","DamageTypeComponent","Equippable","ItemAttributeModifierEntry","ItemAttributeModifiers","ItemEnchantments","PiercingWeapon","Tool","ToolRule","Weapon"]};

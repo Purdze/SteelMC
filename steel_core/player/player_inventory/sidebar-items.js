@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EquipmentSwapResult"],"fn":["hand_to_equipment_slot","slot_to_equipment"],"static":["EMPTY_ITEM"],"struct":["InvalidHotbarSlot","PlayerInventory"]};

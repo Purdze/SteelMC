@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["button_block","redstone_torch_block"]};

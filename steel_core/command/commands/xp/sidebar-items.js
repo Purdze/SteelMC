@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ExperienceType"],"fn":["add_experience","command_handler","set_experience"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FrequencyReductionMethod","PlacementKind","SpreadType"],"fn":["convert_structure_set","generate_ring_positions","java_round","load_vanilla_structure_sets"],"struct":["ExclusionZone","StructurePlacement","StructureSelectionEntry","StructureSet"]};

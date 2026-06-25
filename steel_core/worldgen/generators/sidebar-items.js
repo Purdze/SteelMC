@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["empty","flat","vanilla"],"struct":["EmptyChunkGenerator","FlatChunkGenerator","VanillaGenerator"]};

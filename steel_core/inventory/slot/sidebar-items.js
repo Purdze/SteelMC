@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SlotType"],"fn":["add_hotbar_slots","add_inventory_slots","add_standard_inventory_slots"],"struct":["ArmorSlot","CraftingGridSlot","CraftingResultSlot","NormalSlot"],"trait":["Slot"],"type":["SyncCraftingContainer","SyncResultContainer"]};

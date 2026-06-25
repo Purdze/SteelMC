@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["behavior","block_entity","chunk","chunk_saver","command","config","enchantment_helper","entity","fluid","inventory","level_data","physics","player","poi","portal","server","world","worldgen"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["hash_entries","push_hash_entry"],"struct":["AttackRange","DamageTypeComponent","PiercingWeapon","Weapon"]};

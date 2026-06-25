@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["command_handler","get_gamemode_translation"],"struct":["GameModeCommandExecutor","GameModeTargetCommandExecutor"]};

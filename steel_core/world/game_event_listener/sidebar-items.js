@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["GameEventDeliveryMode"],"fn":["block_distance_sq","contains_listener","exact_distance_sq"],"struct":["GameEventListenerStorage","QueuedListener","SectionListeners","SectionProcessingGuard"],"trait":["GameEventListener"],"type":["SharedGameEventListener"]};

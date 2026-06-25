@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StructureArgumentValue"],"fn":["parse_identifier"],"struct":["StructureArgument"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["VINE_FACE_DIRECTIONS","VINE_HORIZONTAL_DIRECTIONS"],"fn":["face_property"],"struct":["VineBlock"]};

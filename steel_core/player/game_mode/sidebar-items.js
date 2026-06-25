@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ATTACK_RANGE_BUFFER","CREATIVE_BLOCK_RANGE_MODIFIER_AMOUNT","CREATIVE_ENTITY_RANGE_MODIFIER_AMOUNT","ENTITY_INTERACTION_RANGE_BUFFER","FLIGHT_DISABLE_RANGE"],"fn":["piercing_ray_hit_t","ray_aabb_hit_t","sound_holder_ref","strip_formatting_codes","update_ray_axis","use_item","use_item_on"]};

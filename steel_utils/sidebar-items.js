@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MC_VERSION"],"macro":[["chat",1],["command",1],["console",1]],"mod":["axis","climate","codec","direction","entity_events","front_vec","geometry","hash","locks","logger","random","registry","rotation","serial","text","translations","translations_registry","types","uuid_ext","value_providers"],"struct":["FrontVec"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["lerp","lerp2","lerp2_4x","lerp2_simd","lerp3","lerp3_4x","lerp3_simd","lerp_4x","lerp_simd"]};

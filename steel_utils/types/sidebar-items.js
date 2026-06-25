@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Difficulty","GameType","InteractionHand","TraversalNodeStatus"],"struct":["BlockPos","BlockPosWithinManhattan","BlockStateId","ChunkPos","GlobalPos","Identifier","InvalidPackedSectionBlockPos","PackedBlockPos","PackedChunkLocalXZ","PackedChunkPos","PackedSectionBlockPos","PackedSectionPos","SectionPos","Todo","UpdateFlags"]};

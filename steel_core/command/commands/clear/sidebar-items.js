@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["clear_messages","command_handler"],"struct":["ClearMultipleArgumentExecutor","ClearNoArgumentExecutor","ClearWithItemExecutor","ClearWithMaxAmountExecutor"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StructureProcessorRandom"],"struct":["ProcessedBlockInfo","StructureBlockInfo","StructureDataMarker","StructureEntityInfo","StructurePlaceSettings","StructureTemplate","StructureTemplatePalette"]};

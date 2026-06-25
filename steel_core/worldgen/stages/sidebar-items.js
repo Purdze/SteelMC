@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["biomes","carvers","empty","features","full","light","noise","spawn","structures","surface"]};

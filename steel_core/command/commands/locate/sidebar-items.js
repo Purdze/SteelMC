@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_STRUCTURE_LOCATE_RADIUS"],"enum":["LocatePhase","PendingRequest"],"fn":["command_handler","horizontal_distance","locate_coordinates_component","locate_structure","locate_success_component"],"struct":["LocateStructureJob","LocatedStructure"]};

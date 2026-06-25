@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ParsedValue"],"mod":["anchor","block_pos","bool","domain","enchantment","entity","entity_type","float","gamemode","integer","item","player","rotation","structure","text_component","time","vector2","vector3","world"],"struct":["Helper","SuggestionContext"],"trait":["CommandArgument"]};

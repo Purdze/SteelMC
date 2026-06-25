@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["end_portal_frame_block","fire","nether_portal_block"]};

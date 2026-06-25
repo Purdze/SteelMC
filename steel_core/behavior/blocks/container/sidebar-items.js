@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["barrel_block","beehive_block","crafting_table_block"]};

@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `steel-core/src/behavior/blocks/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="steel_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0-nightly (f28ac764c 2026-06-23)" data-channel="nightly" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">steel_core/behavior/blocks/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-2"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Block behavior implementations for vanilla blocks.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! The actual behavior registration is auto-generated from classes.json.
+<a href=#4 id=4 data-nosnippet>4</a>//! See `src/generated/behaviors.rs` for the generated registration code.
+<a href=#5 id=5 data-nosnippet>5</a>
+<a href=#6 id=6 data-nosnippet>6</a></span><span class="kw">mod </span>building;
+<a href=#7 id=7 data-nosnippet>7</a><span class="kw">mod </span>container;
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">mod </span>decoration;
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">mod </span>fluid;
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">mod </span>portal;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">mod </span>redstone;
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">pub mod </span>vegetation;
+<a href=#13 id=13 data-nosnippet>13</a>
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">pub use </span>building::{
+<a href=#15 id=15 data-nosnippet>15</a>    BedBlock, CampfireBlock, DoorBlock, FenceBlock, HayBlock, HoneyBlock, LavaCauldronBlock,
+<a href=#16 id=16 data-nosnippet>16</a>    MagmaBlock, PotentSulfurBlock, PowderSnowBlock, RotatedPillarBlock, ScaffoldingBlock,
+<a href=#17 id=17 data-nosnippet>17</a>    SlabBlock, SlimeBlock, SpongeBlock, StairBlock, WeatherState, WeatheringCopper,
+<a href=#18 id=18 data-nosnippet>18</a>    WeatheringCopperDoorBlock, WeatheringCopperFullBlock, WeatheringCopperSlabBlock,
+<a href=#19 id=19 data-nosnippet>19</a>    WeatheringCopperStairBlock, WetSpongeBlock,
+<a href=#20 id=20 data-nosnippet>20</a>};
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">pub use </span>container::{BarrelBlock, BeehiveBlock, CraftingTableBlock};
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub use </span>decoration::{
+<a href=#23 id=23 data-nosnippet>23</a>    CakeBlock, CandleBlock, CandleCakeBlock, CeilingHangingSignBlock, StandingSignBlock,
+<a href=#24 id=24 data-nosnippet>24</a>    TorchBlock, WallHangingSignBlock, WallSignBlock, WallTorchBlock,
+<a href=#25 id=25 data-nosnippet>25</a>};
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub use </span>fluid::LiquidBlock;
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub use </span>portal::{EndPortalFrameBlock, FireBlock, NetherPortalBlock, SoulFireBlock};
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub use </span>redstone::{ButtonBlock, RedstoneTorchBlock, RedstoneWallTorchBlock};
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub use </span>vegetation::{
+<a href=#30 id=30 data-nosnippet>30</a>    AzaleaBlock, BambooSaplingBlock, BambooStalkBlock, BeetrootBlock, CactusBlock,
+<a href=#31 id=31 data-nosnippet>31</a>    CactusFlowerBlock, CarrotBlock, CocoaBlock, CropBlock, DoublePlantBlock, FlowerBlock,
+<a href=#32 id=32 data-nosnippet>32</a>    NetherSproutsBlock, NetherWartBlock, PitcherCropBlock, PotatoBlock, RootedDirtBlock,
+<a href=#33 id=33 data-nosnippet>33</a>    SeagrassBlock, SugarCaneBlock, SweetBerryBushBlock, TallFlowerBlock, TallGrassBlock,
+<a href=#34 id=34 data-nosnippet>34</a>    TallSeagrassBlock, TorchflowerCropBlock,
+<a href=#35 id=35 data-nosnippet>35</a>};
+<a href=#36 id=36 data-nosnippet>36</a><span class="kw">pub use </span>vegetation::{
+<a href=#37 id=37 data-nosnippet>37</a>    BaseCoralFanBlock, BaseCoralPlantBlock, BaseCoralWallFanBlock, BigDripleafBlock,
+<a href=#38 id=38 data-nosnippet>38</a>    BigDripleafStemBlock, BushBlock, CarpetBlock, CaveVinesBlock, CaveVinesPlantBlock,
+<a href=#39 id=39 data-nosnippet>39</a>    ChorusFlowerBlock, ChorusPlantBlock, CoralFanBlock, CoralPlantBlock, CoralWallFanBlock,
+<a href=#40 id=40 data-nosnippet>40</a>    DryVegetationBlock, EyeblossomBlock, EyeblossomType, FarmlandBlock, FireflyBushBlock,
+<a href=#41 id=41 data-nosnippet>41</a>    FlowerBedBlock, GlowLichenBlock, HangingMossBlock, HangingRootsBlock, KelpBlock,
+<a href=#42 id=42 data-nosnippet>42</a>    KelpPlantBlock, LeafLitterBlock, LilyPadBlock, MangrovePropaguleBlock, MossyCarpetBlock,
+<a href=#43 id=43 data-nosnippet>43</a>    MushroomBlock, NetherFungusBlock, NetherRootsBlock, PointedDripstoneBlock, SaplingBlock,
+<a href=#44 id=44 data-nosnippet>44</a>    SculkVeinBlock, SeaPickleBlock, ShortDryGrassBlock, SmallDripleafBlock, SnowLayerBlock,
+<a href=#45 id=45 data-nosnippet>45</a>    SporeBlossomBlock, SulfurSpikeBlock, TallDryGrassBlock, TwistingVinesBlock,
+<a href=#46 id=46 data-nosnippet>46</a>    TwistingVinesPlantBlock, VineBlock, WeepingVinesBlock, WeepingVinesPlantBlock, WitherRoseBlock,
+<a href=#47 id=47 data-nosnippet>47</a>};
+</code></pre></div></section></main></body></html>

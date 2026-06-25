@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["KNOWN_ENTITY_CLASSES","KNOWN_ENTITY_INTERFACES"],"enum":["EntityClass"],"fn":["assert_entity_impl","block_behavior","entity_behavior","entity_impl","item_behavior","parse_entity_metadata","parse_single_nested_ident","push_unique","strip_json_arg_attrs"],"struct":["EntityMetadata"]};

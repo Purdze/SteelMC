@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WorldChangeRequest"],"mod":["portal_shape"],"struct":["TeleportTransition"]};

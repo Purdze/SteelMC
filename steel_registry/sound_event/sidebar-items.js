@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SoundEventHolder"],"fn":["push_hash_entry"],"struct":["SoundEvent","SoundEventRegistry"],"type":["SoundEventRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NO_TICKET_LEVEL","STATUS_NONE"],"enum":["ChunkResult"],"fn":["optional_ticket_level_from_raw","optional_ticket_level_raw","rayon_spawn"],"static":["SLOW_CHUNK_GEN"],"struct":["ChangedLightSectionSets","ChangedLightSections","ChunkGuard","ChunkHolder","StatusWorkClaim"]};

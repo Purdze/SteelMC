@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["consume_bucket","use_empty_bucket","use_filled_bucket"],"struct":["BucketItem"]};

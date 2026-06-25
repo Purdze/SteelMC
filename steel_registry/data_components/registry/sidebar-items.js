@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ComponentPatchEntry"],"fn":["component_try_into"],"struct":["ComponentEntry","DataComponentMap","DataComponentPatch","DataComponentRegistry","DataComponentType"],"type":["ComponentEntryRef","NbtReader","NbtWriter","NetworkReader","NetworkWriter"]};

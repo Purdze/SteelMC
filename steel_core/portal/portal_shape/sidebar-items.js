@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_empty","nether_portal_config"],"struct":["PortalFrameConfig","PortalShape"]};

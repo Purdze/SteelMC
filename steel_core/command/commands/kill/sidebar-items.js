@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["command_handler","kill_player"],"struct":["KillSelfExecutor","KillTargetsExecutor"]};

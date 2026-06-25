@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["grad_dot","grad_dot_4x","grad_dot_simd"]};

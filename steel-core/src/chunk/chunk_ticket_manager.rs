@@ -191,8 +191,20 @@ pub const fn ticket_level_for_status(status: ChunkStatus) -> ChunkTicketLevel {
     }
 }
 
+/// A stored ticket plus its optional expiry countdown.
+///
+/// `ticks_left` is `None` for permanent tickets (e.g. player view tickets) and
+/// `Some(n)` for timeout tickets that count down each scheduling tick and are
+/// removed when they reach zero. Mirrors vanilla `Ticket.ticksLeft` /
+/// `TicketType.hasTimeout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoredTicket {
+    ticket: ChunkTicket,
+    ticks_left: Option<u32>,
+}
+
 /// Up to 4 tickets stored inline per position.
-type TicketLevels = SmallVec<[ChunkTicket; 4]>;
+type TicketLevels = SmallVec<[StoredTicket; 4]>;
 
 /// A level change for a chunk position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,16 +246,46 @@ impl ChunkTicketManager {
         }
     }
 
-    /// Adds a ticket. Multiple tickets can exist at the same position.
+    /// Adds a permanent ticket. Multiple tickets can exist at the same position.
     pub fn add_ticket(&mut self, pos: ChunkPos, ticket: ChunkTicket) {
-        self.tickets.entry(pos).or_default().push(ticket);
+        self.tickets.entry(pos).or_default().push(StoredTicket {
+            ticket,
+            ticks_left: None,
+        });
         self.dirty = true;
     }
 
-    /// Removes one ticket matching `(pos, ticket)`. Returns true if found.
+    /// Adds (or refreshes) a timeout ticket that expires after `timeout` ticks.
+    ///
+    /// Mirrors vanilla `TicketStorage.addTicket`: if an equal timeout ticket
+    /// already exists at this position, its countdown is reset rather than a
+    /// duplicate being added (and the propagated levels are unchanged, so this
+    /// does not mark the manager dirty).
+    pub fn add_ticket_with_timeout(&mut self, pos: ChunkPos, ticket: ChunkTicket, timeout: u32) {
+        let tickets = self.tickets.entry(pos).or_default();
+        if let Some(existing) = tickets
+            .iter_mut()
+            .find(|stored| stored.ticket == ticket && stored.ticks_left.is_some())
+        {
+            existing.ticks_left = Some(timeout);
+            return;
+        }
+        tickets.push(StoredTicket {
+            ticket,
+            ticks_left: Some(timeout),
+        });
+        self.dirty = true;
+    }
+
+    /// Removes one permanent ticket matching `(pos, ticket)`. Returns true if found.
+    ///
+    /// Only matches permanent tickets (`ticks_left == None`); timeout tickets are
+    /// reclaimed by [`Self::tick_timeouts`].
     pub fn remove_ticket(&mut self, pos: ChunkPos, ticket: ChunkTicket) -> bool {
         if let Some(tickets) = self.tickets.get_mut(&pos)
-            && let Some(idx) = tickets.iter().position(|&existing| existing == ticket)
+            && let Some(idx) = tickets
+                .iter()
+                .position(|stored| stored.ticks_left.is_none() && stored.ticket == ticket)
         {
             tickets.swap_remove(idx);
             self.dirty = true;
@@ -255,10 +297,31 @@ impl ChunkTicketManager {
         false
     }
 
-    /// Removes all tickets at position.
-    pub fn remove_all_tickets_at(&mut self, pos: ChunkPos) -> Option<TicketLevels> {
-        let removed = self.tickets.remove(&pos);
-        if removed.is_some() {
+    /// Decrements every timeout ticket's countdown and removes the expired ones.
+    ///
+    /// Mirrors vanilla `TicketStorage.purgeStaleTickets`; call once per scheduling
+    /// tick before [`Self::run_all_updates`].
+    pub fn tick_timeouts(&mut self) {
+        self.tickets.retain(|_, tickets| {
+            let before = tickets.len();
+            tickets.retain_mut(|stored| {
+                let Some(ticks_left) = stored.ticks_left.as_mut() else {
+                    return true;
+                };
+                *ticks_left = ticks_left.saturating_sub(1);
+                *ticks_left > 0
+            });
+            if tickets.len() != before {
+                self.dirty = true;
+            }
+            !tickets.is_empty()
+        });
+    }
+
+    /// Removes all tickets at position. Returns true if any were present.
+    pub fn remove_all_tickets_at(&mut self, pos: ChunkPos) -> bool {
+        let removed = self.tickets.remove(&pos).is_some();
+        if removed {
             self.dirty = true;
         }
         removed
@@ -269,12 +332,15 @@ impl ChunkTicketManager {
     pub fn get_ticket(&self, pos: ChunkPos) -> Option<ChunkTicketLevel> {
         self.tickets
             .get(&pos)
-            .and_then(|tickets| tickets.iter().map(|ticket| ticket.load_level()).min())
+            .and_then(|tickets| tickets.iter().map(|stored| stored.ticket.load_level()).min())
     }
 
-    #[must_use]
-    pub fn get_tickets_at(&self, pos: ChunkPos) -> Option<&[ChunkTicket]> {
-        self.tickets.get(&pos).map(smallvec::SmallVec::as_slice)
+    /// Iterator over the tickets currently held at `pos`.
+    pub fn tickets_at(&self, pos: ChunkPos) -> impl Iterator<Item = ChunkTicket> + '_ {
+        self.tickets
+            .get(&pos)
+            .into_iter()
+            .flat_map(|tickets| tickets.iter().map(|stored| stored.ticket))
     }
 
     /// Iterator over (position, `min_level`) for all ticket sources.
@@ -282,7 +348,7 @@ impl ChunkTicketManager {
         self.tickets.iter().filter_map(|(&pos, tickets)| {
             tickets
                 .iter()
-                .map(|ticket| ticket.load_level())
+                .map(|stored| stored.ticket.load_level())
                 .min()
                 .map(|level| (pos, level))
         })
@@ -323,7 +389,11 @@ impl ChunkTicketManager {
 
         // Propagate each ticket source
         for (&source_pos, tickets) in &self.tickets {
-            let Some(source_level) = tickets.iter().map(|ticket| ticket.load_level()).min() else {
+            let Some(source_level) = tickets
+                .iter()
+                .map(|stored| stored.ticket.load_level())
+                .min()
+            else {
                 continue;
             };
 
@@ -348,7 +418,7 @@ impl ChunkTicketManager {
 
             let Some(simulation_level) = tickets
                 .iter()
-                .filter_map(|ticket| ticket.simulation_level())
+                .filter_map(|stored| stored.ticket.simulation_level())
                 .min()
             else {
                 continue;
@@ -758,6 +828,87 @@ mod tests {
                 propagation_radius >= required_radius,
                 "{status:?} request maps to level {ticket_level:?}, propagation radius {propagation_radius}, required radius {required_radius}"
             );
+        }
+    }
+
+    #[test]
+    fn timeout_ticket_expires_after_its_countdown() {
+        let mut manager = ChunkTicketManager::new();
+        let pos = ChunkPos::new(0, 0);
+        manager.add_ticket_with_timeout(pos, ChunkTicket::simulated_full_chunks(2), 3);
+        manager.run_all_updates();
+        assert!(manager.get_level(pos).is_some());
+
+        // 3 ticks: 3 -> 2 -> 1 -> 0 (removed on the third).
+        manager.tick_timeouts();
+        assert!(!manager.is_dirty(), "no removal yet, levels unchanged");
+        manager.tick_timeouts();
+        manager.tick_timeouts();
+        assert!(manager.is_dirty(), "expiry marks the manager dirty");
+
+        manager.run_all_updates();
+        assert_eq!(manager.get_level(pos), None);
+        assert_eq!(manager.ticket_count(), 0);
+    }
+
+    #[test]
+    fn re_adding_timeout_ticket_resets_countdown_without_duplicating() {
+        let mut manager = ChunkTicketManager::new();
+        let pos = ChunkPos::new(0, 0);
+        let ticket = ChunkTicket::simulated_full_chunks(2);
+        manager.add_ticket_with_timeout(pos, ticket, 3);
+        manager.run_all_updates();
+
+        // Run the countdown down to 1, then refresh back to 3.
+        manager.tick_timeouts();
+        manager.tick_timeouts();
+        manager.add_ticket_with_timeout(pos, ticket, 3);
+        assert_eq!(manager.ticket_count(), 1, "refresh must not duplicate");
+
+        // Would have expired after one more tick; instead it survives the full reset.
+        manager.tick_timeouts();
+        manager.tick_timeouts();
+        manager.run_all_updates();
+        assert!(manager.get_level(pos).is_some());
+    }
+
+    #[test]
+    fn permanent_tickets_never_expire() {
+        let mut manager = ChunkTicketManager::new();
+        let pos = ChunkPos::new(0, 0);
+        manager.add_ticket(pos, ChunkTicket::full_chunks(MAX_VIEW_DISTANCE));
+        manager.run_all_updates();
+
+        for _ in 0..100 {
+            manager.tick_timeouts();
+        }
+        manager.run_all_updates();
+        assert_eq!(
+            manager.get_level(pos),
+            ChunkTicketLevel::new(0),
+            "player-style permanent tickets are never reclaimed by timeouts"
+        );
+    }
+
+    #[test]
+    fn timeout_ticket_propagates_like_a_manual_simulated_ticket() {
+        let mut timed = ChunkTicketManager::new();
+        let mut manual = ChunkTicketManager::new();
+        let pos = ChunkPos::new(0, 0);
+        timed.add_ticket_with_timeout(pos, ChunkTicket::simulated_full_chunks(2), 40);
+        manual.add_ticket(pos, ChunkTicket::simulated_full_chunks(2));
+        timed.run_all_updates();
+        manual.run_all_updates();
+
+        for dx in -2..=2 {
+            for dy in -2..=2 {
+                let p = ChunkPos::new(dx, dy);
+                assert_eq!(timed.get_level(p), manual.get_level(p));
+                assert_eq!(
+                    timed.get_simulation_level(p),
+                    manual.get_simulation_level(p)
+                );
+            }
         }
     }
 }

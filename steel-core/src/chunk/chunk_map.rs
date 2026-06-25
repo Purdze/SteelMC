@@ -50,6 +50,15 @@ use crate::{entity::Entity, player::Player};
 
 const GENERATION_THREAD_MULTIPLE: usize = 2;
 
+/// Lifetime, in ticks, of a thrown ender pearl's chunk ticket (vanilla
+/// `TicketType.ENDER_PEARL` timeout). The pearl refreshes it every
+/// `ENDER_PEARL_TICKET_TIMEOUT - 1` ticks while it flies.
+pub const ENDER_PEARL_TICKET_TIMEOUT: u32 = 40;
+
+/// Square radius, in chunks, of a thrown ender pearl's chunk ticket (vanilla
+/// `placeEnderPearlTicket` passes `2`).
+pub const ENDER_PEARL_TICKET_RADIUS: u8 = 2;
+
 /// Timing information for the game tick portion of chunk map operations.
 #[derive(Debug, Default)]
 pub struct ChunkMapGameTickTimings {
@@ -1340,6 +1349,10 @@ impl ChunkMap {
             let _span = tracing::trace_span!("ticket_updates").entered();
             let start = Instant::now();
             let mut ct = self.chunk_tickets.lock();
+            // Vanilla `ServerChunkCache.tick` purges stale timeout tickets before
+            // `runDistanceManagerUpdates`; do the same so expired tickets release
+            // their chunks in the same propagation pass.
+            ct.tick_timeouts();
             let result = ct.run_all_updates().to_vec();
             timings.ticket_updates = start.elapsed();
             result
@@ -1683,6 +1696,23 @@ impl ChunkMap {
             let ticket = ChunkTicket::player(last_view.view_distance, world.simulation_distance);
             chunk_tickets.remove_ticket(last_view.center, ticket);
         }
+    }
+
+    /// Places (or refreshes) the timeout ticket that keeps a thrown ender pearl's
+    /// chunk loaded and ticking while it flies.
+    ///
+    /// Mirrors vanilla `ServerPlayer.placeEnderPearlTicket` →
+    /// `chunkSource.addTicketWithRadius(ENDER_PEARL, chunk, 2)`. Re-placing the
+    /// same ticket resets its countdown rather than stacking duplicates.
+    // TODO: vanilla's ENDER_PEARL ticket also sets FLAG_KEEP_DIMENSION_ACTIVE
+    // (`resetEmptyTime`/`shouldKeepDimensionActive`); SteelMC has no idle-dimension
+    // unload concept yet, so that flag has no analog here.
+    pub fn place_ender_pearl_ticket(&self, chunk: ChunkPos) {
+        self.chunk_tickets.lock().add_ticket_with_timeout(
+            chunk,
+            ChunkTicket::simulated_full_chunks(ENDER_PEARL_TICKET_RADIUS),
+            ENDER_PEARL_TICKET_TIMEOUT,
+        );
     }
 
     /// Saves all dirty chunks to disk.

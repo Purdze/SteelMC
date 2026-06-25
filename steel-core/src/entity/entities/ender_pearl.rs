@@ -5,14 +5,17 @@
 //! On collision it teleports its owning player to the pearl's pre-move position,
 //! deals 5.0 `ender_pearl` damage, plays the teleport sound, and discards itself.
 //!
-//! TODO (deferred follow-up — see plan): the 1.21.2+ chunk-loading ticket
-//! (`TicketType.ENDER_PEARL`) and player-bound persistence (`ServerPlayer`
-//! `ender_pearls` set + NBT) are not yet implemented. In this pass the pearl
-//! flies as an ordinary entity and is saved with its chunk.
+//! The pearl refreshes a timeout chunk ticket (`TicketType.ENDER_PEARL`) each tick
+//! so it keeps flying across the simulation border.
+//!
+//! TODO (deferred follow-up — see plan): player-bound persistence (`ServerPlayer`
+//! `ender_pearls` set + NBT) is not yet implemented, so a pearl whose owner logs
+//! out is saved with its chunk rather than re-spawned on login.
 
 use std::sync::{Arc, Weak};
 
 use glam::DVec3;
+use steel_utils::ChunkPos;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
@@ -25,6 +28,7 @@ use steel_registry::vanilla_game_rules::ENDER_PEARLS_VANISH_ON_DEATH;
 use steel_registry::{sound_events, vanilla_damage_types, vanilla_items};
 use steel_utils::locks::SyncMutex;
 
+use crate::chunk::chunk_map::ENDER_PEARL_TICKET_TIMEOUT;
 use crate::entity::damage::DamageSource;
 use crate::entity::{
     Entity, EntityBase, EntityBaseLoad, EntitySyncedData, LivingEntity, Projectile, ProjectileBase,
@@ -47,6 +51,8 @@ pub struct EnderPearlEntity {
     entity_data: SyncMutex<EnderPearlEntityData>,
     /// Shared `Projectile` state (owner / left-owner / has-been-shot).
     projectile_base: ProjectileBase,
+    /// Countdown until the chunk-loading ticket is refreshed (vanilla `ticketTimer`).
+    ticket_timer: SyncMutex<i32>,
 }
 
 impl EnderPearlEntity {
@@ -58,6 +64,7 @@ impl EnderPearlEntity {
             entity_type,
             entity_data: SyncMutex::new(EnderPearlEntityData::new()),
             projectile_base: ProjectileBase::new(),
+            ticket_timer: SyncMutex::new(0),
         }
     }
 
@@ -69,12 +76,34 @@ impl EnderPearlEntity {
             entity_type,
             entity_data: SyncMutex::new(EnderPearlEntityData::new()),
             projectile_base: ProjectileBase::new(),
+            ticket_timer: SyncMutex::new(0),
         }
     }
 
     /// Resolves the owner as an online player in `world`, if any.
     fn owner_player(&self, world: &Arc<World>) -> Option<Arc<Player>> {
         world.players.get_by_uuid(&self.owner_uuid()?)
+    }
+
+    /// Refreshes the chunk-loading ticket so the pearl keeps flying across the
+    /// simulation border (vanilla `ThrownEnderpearl.tick` →
+    /// `registerAndUpdateEnderPearlTicket`).
+    ///
+    /// Re-places the ticket when the countdown lapses or the pearl crosses a chunk
+    /// border, but only while owned by an online player.
+    fn update_ender_pearl_ticket(&self, world: &Arc<World>) {
+        let current_chunk = ChunkPos::from_entity_pos(self.position());
+        let crossed_border = ChunkPos::from_entity_pos(self.old_position()) != current_chunk;
+
+        let mut timer = self.ticket_timer.lock();
+        *timer -= 1;
+        if (*timer > 0 && !crossed_border) || self.owner_player(world).is_none() {
+            return;
+        }
+
+        world.chunk_map.place_ender_pearl_ticket(current_chunk);
+        // Vanilla `registerAndUpdateEnderPearlTicket` returns `timeout - 1`.
+        *timer = ENDER_PEARL_TICKET_TIMEOUT as i32 - 1;
     }
 
     /// Vanilla `ThrownEnderpearl.tick` owner-death short-circuit: a pearl whose
@@ -142,16 +171,23 @@ impl Entity for EnderPearlEntity {
 
     fn tick(&self) {
         // Vanilla `ThrownEnderpearl.tick`: vanish if the owner died (gamerule),
-        // otherwise run the throwable projectile movement/collision loop.
-        // TODO (Phase 4): refresh the ENDER_PEARL chunk ticket here.
-        if let Some(world) = self.level()
-            && self.should_vanish_on_owner_death(&world)
-        {
+        // otherwise run the throwable projectile movement/collision loop and keep
+        // the pearl's chunk loaded via the ENDER_PEARL ticket.
+        let Some(world) = self.level() else {
+            self.throwable_projectile_tick();
+            return;
+        };
+
+        if self.should_vanish_on_owner_death(&world) {
             self.set_removed(RemovalReason::Discarded);
             return;
         }
 
         self.throwable_projectile_tick();
+
+        if self.is_alive() {
+            self.update_ender_pearl_ticket(&world);
+        }
     }
 
     fn get_default_gravity(&self) -> f64 {

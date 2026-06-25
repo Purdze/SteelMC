@@ -691,6 +691,7 @@ mod living_base;
 mod manager;
 mod mob;
 mod movement_sync;
+pub mod projectile;
 mod registry;
 mod shared_flags;
 mod spawn;
@@ -740,6 +741,10 @@ pub use registry::{ENTITIES, EntityLoadRequest, EntityRegistry, init_entities};
 pub(crate) use shared_flags::EntitySharedFlags;
 pub(crate) use spawn::{AgeableMobGroupData, EntitySpawnReason, SpawnGroupData};
 pub(crate) use storage::EntityStorage;
+pub use projectile::{
+    EntityHitResult, Projectile, ProjectileBase, ProjectileHit, ThrowableItemProjectile,
+    ThrowableProjectile, compute_margin,
+};
 pub use synced_data::EntitySyncedData;
 pub(crate) use ticking::{
     snapshot_old_pos_and_rot_for_tick, tick_vehicle_passengers_with_ticked_if,

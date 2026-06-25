@@ -1,0 +1,314 @@
+//! Thrown ender pearl projectile entity (`ThrownEnderpearl`).
+//!
+//! Mirrors vanilla `ThrownEnderpearl` (yarn `EnderPearlEntity`) on the Steel
+//! `Projectile → ThrowableProjectile → ThrowableItemProjectile` trait stack.
+//! On collision it teleports its owning player to the pearl's pre-move position,
+//! deals 5.0 `ender_pearl` damage, plays the teleport sound, and discards itself.
+//!
+//! TODO (deferred follow-up — see plan): the 1.21.2+ chunk-loading ticket
+//! (`TicketType.ENDER_PEARL`) and player-bound persistence (`ServerPlayer`
+//! `ender_pearls` set + NBT) are not yet implemented. In this pass the pearl
+//! flies as an ordinary entity and is saved with its chunk.
+
+use std::sync::{Arc, Weak};
+
+use glam::DVec3;
+use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
+use simdnbt::owned::NbtCompound;
+use steel_macros::entity_behavior;
+use steel_protocol::packets::game::SoundSource;
+use steel_registry::entity_type::EntityTypeRef;
+use steel_registry::item_stack::ItemStack;
+use steel_registry::items::ItemRef;
+use steel_registry::vanilla_entity_data::EnderPearlEntityData;
+use steel_registry::vanilla_game_rules::ENDER_PEARLS_VANISH_ON_DEATH;
+use steel_registry::{sound_events, vanilla_damage_types, vanilla_items};
+use steel_utils::locks::SyncMutex;
+
+use crate::entity::damage::DamageSource;
+use crate::entity::{
+    Entity, EntityBase, EntityBaseLoad, EntitySyncedData, LivingEntity, Projectile, ProjectileBase,
+    ProjectileHit, RemovalReason, SharedEntity, ThrowableItemProjectile, ThrowableProjectile,
+};
+use crate::player::Player;
+use crate::world::World;
+
+/// Fall-style damage dealt to the teleporting owner (vanilla `enderPearl()`, 5.0).
+const TELEPORT_DAMAGE: f32 = 5.0;
+
+/// A thrown ender pearl.
+#[entity_behavior(class = "ThrownEnderpearl")]
+pub struct EnderPearlEntity {
+    /// Common entity fields (id, uuid, position, etc.).
+    base: EntityBase,
+    /// Vanilla entity type registered for this implementation.
+    entity_type: EntityTypeRef,
+    /// Synced data carrying the rendered item stack.
+    entity_data: SyncMutex<EnderPearlEntityData>,
+    /// Shared `Projectile` state (owner / left-owner / has-been-shot).
+    projectile_base: ProjectileBase,
+}
+
+impl EnderPearlEntity {
+    /// Creates a new ender pearl with no owner and the default rendered item.
+    #[must_use]
+    pub fn new(entity_type: EntityTypeRef, id: i32, position: DVec3, world: Weak<World>) -> Self {
+        Self {
+            base: EntityBase::new(id, position, entity_type.dimensions, world),
+            entity_type,
+            entity_data: SyncMutex::new(EnderPearlEntityData::new()),
+            projectile_base: ProjectileBase::new(),
+        }
+    }
+
+    /// Creates an ender pearl from saved base data.
+    #[must_use]
+    pub fn from_saved(entity_type: EntityTypeRef, load: EntityBaseLoad) -> Self {
+        Self {
+            base: EntityBase::from_load(load, entity_type.dimensions),
+            entity_type,
+            entity_data: SyncMutex::new(EnderPearlEntityData::new()),
+            projectile_base: ProjectileBase::new(),
+        }
+    }
+
+    /// Resolves the owner as an online player in `world`, if any.
+    fn owner_player(&self, world: &Arc<World>) -> Option<Arc<Player>> {
+        world.players.get_by_uuid(&self.owner_uuid()?)
+    }
+
+    /// Vanilla `ThrownEnderpearl.tick` owner-death short-circuit: a pearl whose
+    /// owner is a dead player vanishes when the gamerule is set.
+    // TODO: vanilla also exempts `serverPlayer.wonGame` (credits roll).
+    fn should_vanish_on_owner_death(&self, world: &Arc<World>) -> bool {
+        let Some(player) = self.owner_player(world) else {
+            return false;
+        };
+        // Vanilla checks `!owner.isAlive()` for a dead (but still connected) player.
+        // `LivingEntity::is_alive` is the health-based override vanilla dispatches to.
+        !LivingEntity::is_alive(&*player)
+            && world.get_game_rule(&ENDER_PEARLS_VANISH_ON_DEATH).as_bool() == Some(true)
+    }
+
+    /// Vanilla `ThrownEnderpearl.isAllowedToTeleportOwner` (same-dimension case).
+    // TODO: cross-dimension teleport (`canUsePortal`) is deferred.
+    fn is_allowed_to_teleport_owner(player: &Player) -> bool {
+        LivingEntity::is_alive(player) && !player.is_sleeping()
+    }
+
+    /// Teleports the owning player and applies the pearl's effects.
+    ///
+    /// Mirrors the `ServerPlayer` branch of vanilla `ThrownEnderpearl.onHit`.
+    #[expect(
+        clippy::unused_self,
+        reason = "uses self once the endermite-spawn and portal-cooldown TODOs land"
+    )]
+    fn teleport_owner(&self, world: &Arc<World>, player: &Arc<Player>, teleport_pos: DVec3) {
+        // TODO: 5% endermite spawn (Endermite entity not implemented).
+        // TODO: portal-cooldown transfer when the pearl is on portal cooldown.
+
+        // Vanilla keeps the owner's rotation (Relative.ROTATION) and momentum
+        // (Relative.DELTA); Steel's `teleport` preserves rotation but currently
+        // zeroes velocity. TODO: preserve momentum once the teleport API allows it.
+        let (yaw, pitch) = player.rotation();
+        if let Err(error) = player.teleport(teleport_pos, yaw, pitch) {
+            log::debug!("failed to teleport ender pearl owner: {error}");
+            return;
+        }
+        player.reset_fall_distance();
+
+        let damage = DamageSource::environment(&vanilla_damage_types::ENDER_PEARL);
+        player.hurt_server(&damage, TELEPORT_DAMAGE);
+
+        world.play_sound_at(
+            &sound_events::ENTITY_PLAYER_TELEPORT,
+            SoundSource::Players,
+            teleport_pos,
+            1.0,
+            1.0,
+            None,
+        );
+    }
+}
+
+impl Entity for EnderPearlEntity {
+    fn base(&self) -> &EntityBase {
+        &self.base
+    }
+
+    fn entity_type(&self) -> EntityTypeRef {
+        self.entity_type
+    }
+
+    fn tick(&self) {
+        // Vanilla `ThrownEnderpearl.tick`: vanish if the owner died (gamerule),
+        // otherwise run the throwable projectile movement/collision loop.
+        // TODO (Phase 4): refresh the ENDER_PEARL chunk ticket here.
+        if let Some(world) = self.level()
+            && self.should_vanish_on_owner_death(&world)
+        {
+            self.set_removed(RemovalReason::Discarded);
+            return;
+        }
+
+        self.throwable_projectile_tick();
+    }
+
+    fn get_default_gravity(&self) -> f64 {
+        self.throwable_default_gravity()
+    }
+
+    fn sound_source(&self) -> SoundSource {
+        SoundSource::Neutral
+    }
+
+    fn attackable(&self) -> bool {
+        false
+    }
+
+    fn synced_data(&self) -> Option<&dyn EntitySyncedData> {
+        Some(&self.entity_data)
+    }
+
+    fn hurt(&self, _source: &DamageSource, _amount: f32) -> bool {
+        // Vanilla `Projectile.hurtServer` marks hurt but never takes damage.
+        false
+    }
+
+    fn save_additional(&self, nbt: &mut NbtCompound) {
+        self.save_projectile(nbt);
+        self.save_throwable_item(nbt);
+    }
+
+    fn load_additional(&self, nbt: BorrowedNbtCompoundView<'_, '_>) {
+        self.load_projectile(nbt);
+        self.load_throwable_item(nbt);
+    }
+}
+
+impl Projectile for EnderPearlEntity {
+    fn projectile_base(&self) -> &ProjectileBase {
+        &self.projectile_base
+    }
+
+    fn on_hit_entity(&self, entity: &SharedEntity, _location: DVec3) {
+        // Vanilla `ThrownEnderpearl.onHitEntity`: deal 0 damage with a `thrown`
+        // source so the hit entity registers the impact without being hurt.
+        let mut damage = DamageSource::environment(&vanilla_damage_types::THROWN)
+            .with_direct_entity(self.id());
+        if let Some(owner) = self.get_owner() {
+            damage = damage.with_causing_entity(owner.id());
+        }
+        entity.hurt(&damage, 0.0);
+    }
+
+    fn on_hit(&self, hit: &ProjectileHit) {
+        // Vanilla `ThrownEnderpearl.onHit`: super.onHit() then teleport the owner.
+        self.projectile_on_hit(hit);
+
+        // TODO: spawn 32 portal particles (needs CLevelParticles packet).
+        let Some(world) = self.level() else {
+            return;
+        };
+        if self.is_removed() {
+            return;
+        }
+
+        let teleport_pos = self.old_position();
+        if let Some(player) = self.owner_player(&world)
+            && Self::is_allowed_to_teleport_owner(&player)
+        {
+            self.teleport_owner(&world, &player, teleport_pos);
+        }
+        self.set_removed(RemovalReason::Discarded);
+    }
+}
+
+impl ThrowableProjectile for EnderPearlEntity {}
+
+impl ThrowableItemProjectile for EnderPearlEntity {
+    fn get_default_item(&self) -> ItemRef {
+        &vanilla_items::ITEMS.ender_pearl
+    }
+
+    fn set_item(&self, item: ItemStack) {
+        self.entity_data
+            .lock()
+            .throwable_item_projectile
+            .item_stack
+            .set(item);
+    }
+
+    fn get_item(&self) -> ItemStack {
+        self.entity_data
+            .lock()
+            .throwable_item_projectile
+            .item_stack
+            .get()
+            .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Weak;
+
+    use glam::DVec3;
+    use steel_registry::{test_support::init_test_registry, vanilla_entities, vanilla_items};
+
+    use crate::entity::{Entity, Projectile, ThrowableItemProjectile};
+    use crate::world::World;
+
+    use super::EnderPearlEntity;
+
+    #[test]
+    fn shoot_aligns_velocity_with_direction() {
+        init_test_registry();
+
+        let pearl = EnderPearlEntity::new(
+            &vanilla_entities::ENDER_PEARL,
+            1,
+            DVec3::ZERO,
+            Weak::<World>::new(),
+        );
+        pearl.shoot(DVec3::new(0.0, 0.0, 1.0), 1.5, 1.0);
+
+        let velocity = pearl.velocity();
+        assert!(velocity.z > 0.0);
+        assert!((velocity.length() - 1.5).abs() < 0.1);
+        assert!(velocity.x.abs() < 0.1 && velocity.y.abs() < 0.1);
+    }
+
+    #[test]
+    fn owner_round_trips() {
+        init_test_registry();
+
+        let pearl = EnderPearlEntity::new(
+            &vanilla_entities::ENDER_PEARL,
+            1,
+            DVec3::ZERO,
+            Weak::<World>::new(),
+        );
+        assert!(pearl.owner_uuid().is_none());
+
+        let uuid = uuid::Uuid::from_u128(0x1234_5678_9abc_def0);
+        pearl.set_owner_uuid(Some(uuid));
+        assert_eq!(pearl.owner_uuid(), Some(uuid));
+    }
+
+    #[test]
+    fn default_item_is_ender_pearl() {
+        init_test_registry();
+
+        let pearl = EnderPearlEntity::new(
+            &vanilla_entities::ENDER_PEARL,
+            1,
+            DVec3::ZERO,
+            Weak::<World>::new(),
+        );
+        assert_eq!(
+            pearl.get_default_item().key,
+            vanilla_items::ITEMS.ender_pearl.key
+        );
+    }
+}

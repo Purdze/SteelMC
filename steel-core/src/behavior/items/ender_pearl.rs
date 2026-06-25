@@ -59,10 +59,11 @@ impl ItemBehavior for EnderPearlItem {
         pearl.shoot_from_rotation(player, player_pitch, yaw, 0.0, SHOOT_POWER, 1.0);
 
         let entity: SharedEntity = pearl;
-        if let Err(error) = world.try_add_entity(entity) {
+        if let Err(error) = world.try_add_entity(entity.clone()) {
             log::debug!("failed to spawn ender pearl: {error}");
             return InteractionResult::Fail;
         }
+        player.register_ender_pearl(&entity);
 
         // TODO: award the ITEM_USED stat once a stats system exists.
         context.inv.with_item(|item| item.shrink(1));

@@ -78,6 +78,7 @@ use steel_registry::{
     vanilla_particle_types,
 };
 use steel_utils::entity_events::EntityStatus;
+use uuid::Uuid;
 
 use arc_swap::ArcSwap;
 use steel_utils::locks::SyncMutex;
@@ -279,6 +280,9 @@ pub struct Player {
 
     /// Persisted `RootVehicle` payload awaiting live entity restoration.
     pending_root_vehicle: SyncMutex<Option<PendingRootVehicleRestore>>,
+    /// In-flight ender pearls thrown by this player, kept weakly so they persist
+    /// with the player and re-spawn on login (vanilla `ServerPlayer.enderPearls`).
+    ender_pearls: SyncMutex<Vec<Weak<dyn Entity>>>,
 }
 
 #[derive(Clone)]
@@ -503,6 +507,7 @@ impl Player {
             experience: SyncMutex::new(Experience::default()),
             chunk_send_epoch: SyncMutex::new(0),
             pending_root_vehicle: SyncMutex::new(None),
+            ender_pearls: SyncMutex::new(Vec::new()),
         }
     }
 
@@ -1153,6 +1158,34 @@ impl Player {
         } else {
             None
         }
+    }
+
+    /// Registers a thrown ender pearl so it persists with this player and
+    /// re-spawns on login (vanilla `ServerPlayer.registerEnderPearl`).
+    pub fn register_ender_pearl(&self, pearl: &SharedEntity) {
+        let uuid = pearl.uuid();
+        let mut pearls = self.ender_pearls.lock();
+        pearls.retain(|weak| {
+            weak.upgrade()
+                .is_some_and(|p| !p.is_removed() && p.uuid() != uuid)
+        });
+        pearls.push(Arc::downgrade(pearl));
+    }
+
+    /// Deregisters a thrown ender pearl once it hits, teleports, or is discarded
+    /// (vanilla `ServerPlayer.deregisterEnderPearl`).
+    pub fn deregister_ender_pearl(&self, uuid: Uuid) {
+        self.ender_pearls
+            .lock()
+            .retain(|weak| weak.upgrade().is_some_and(|p| p.uuid() != uuid));
+    }
+
+    /// Returns this player's live, in-flight ender pearls, pruning dead entries.
+    #[must_use]
+    pub fn ender_pearls(&self) -> Vec<SharedEntity> {
+        let mut pearls = self.ender_pearls.lock();
+        pearls.retain(|weak| weak.upgrade().is_some_and(|p| !p.is_removed()));
+        pearls.iter().filter_map(Weak::upgrade).collect()
     }
 
     /// Returns this player's local server tick count.

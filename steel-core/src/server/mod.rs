@@ -19,11 +19,13 @@ use crate::command::CommandDispatcher;
 use crate::config::{ResolvedWorldConfig, RuntimeConfig, WorldsConfig};
 use crate::entity::{Entity, EntityBase, RemovalReason, SharedEntity, init_entities};
 
-use crate::chunk_saver::{ChunkStorage, registry::WorldStorageRegistry};
+use crate::chunk_saver::{ChunkStorage, PersistentEntity, registry::WorldStorageRegistry};
 use crate::level_data::{LevelDataManager, RespawnData, WorldGenerationSettings};
 use crate::player::chunk_sender::{ChunkSender, EncodedChunk};
 use crate::player::connection::NetworkConnection;
-use crate::player::player_data::{PersistentPlayerData, PersistentRootVehicle};
+use crate::player::player_data::{
+    PersistentEnderPearl, PersistentPlayerData, PersistentRootVehicle,
+};
 use crate::player::player_data_storage::{GlobalPlayerData, PlayerDataStorage};
 use crate::player::{Player, ResetReason};
 use crate::portal::{TeleportTransition, WorldChangeRequest};
@@ -363,6 +365,105 @@ fn discard_restored_entities(entities: &[SharedEntity]) {
     }
 }
 
+/// Re-spawns a single persisted ender pearl in its own world once the target
+/// chunk is loaded (vanilla `ServerPlayer.loadAndSpawnEnderPearl`).
+struct EnderPearlRestoreJob {
+    player: Arc<Player>,
+    world: Arc<World>,
+    request: ChunkRequestHandle,
+    entity: PersistentEntity,
+}
+
+impl EnderPearlRestoreJob {
+    fn new(player: Arc<Player>, world: Arc<World>, entity: PersistentEntity) -> Option<Self> {
+        let chunk = ender_pearl_chunk(&entity)?;
+        let request = world.chunk_map.request_chunk(
+            chunk,
+            ChunkStatus::StructureStarts,
+            ChunkTicketKind::PlayerSpawn,
+        );
+        Some(Self {
+            player,
+            world,
+            request,
+            entity,
+        })
+    }
+}
+
+impl ServerJob for EnderPearlRestoreJob {
+    fn poll(&mut self, _context: &mut ServerJobContext) -> JobPoll {
+        // The pearl lives in its own world, which may differ from the player's, so
+        // only the connection (not the player's current world) gates the restore.
+        if self.player.connection.closed() {
+            return JobPoll::Finished;
+        }
+
+        match self.request.poll() {
+            ChunkRequestState::Pending { .. } => JobPoll::Pending,
+            ChunkRequestState::Cancelled => JobPoll::Finished,
+            ChunkRequestState::Ready => {
+                if self.request.ready_chunks().is_none() {
+                    return JobPoll::Pending;
+                }
+                restore_ender_pearl_for_player(&self.player, &self.world, &self.entity);
+                JobPoll::Finished
+            }
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.request.cancel();
+    }
+}
+
+fn ender_pearl_chunk(entity: &PersistentEntity) -> Option<ChunkPos> {
+    let pos = DVec3::new(entity.pos[0], entity.pos[1], entity.pos[2]);
+    if !pos.x.is_finite() || !pos.y.is_finite() || !pos.z.is_finite() {
+        tracing::warn!(
+            uuid = ?Uuid::from_bytes(entity.uuid),
+            "Skipping persisted ender pearl with non-finite position {pos:?}",
+        );
+        return None;
+    }
+    Some(ChunkPos::from_entity_pos(pos))
+}
+
+fn restore_ender_pearl_for_player(
+    player: &Arc<Player>,
+    world: &Arc<World>,
+    entity: &PersistentEntity,
+) {
+    let Some(chunk) = ender_pearl_chunk(entity) else {
+        return;
+    };
+    let level = Arc::downgrade(world);
+    let entities = ChunkStorage::persistent_to_entity_tree_at_level(entity, chunk, &level);
+    if entities.is_empty() {
+        tracing::warn!(
+            player = %player.gameprofile.name,
+            "Persisted ender pearl did not recreate a runtime entity",
+        );
+        return;
+    }
+
+    if let Err(error) = world.register_loaded_entity_tree(&entities) {
+        tracing::warn!(
+            player = %player.gameprofile.name,
+            "Discarding persisted ender pearl because it could not be registered: {error}",
+        );
+        discard_restored_entities(&entities);
+        return;
+    }
+
+    for pearl in &entities {
+        player.register_ender_pearl(pearl);
+    }
+    // Vanilla re-places the ENDER_PEARL ticket when the pearl is loaded.
+    world.chunk_map.place_ender_pearl_ticket(chunk);
+    world.mark_chunk_dirty(chunk);
+}
+
 /// The main server struct.
 pub struct Server {
     /// Runtime configuration (view distance, compression, etc.).
@@ -592,6 +693,7 @@ impl Server {
             player.send_inventory_to_remote();
         }
         self.schedule_root_vehicle_restore(&player, &state);
+        self.schedule_ender_pearl_restores(&player, &state);
         if player.connection.closed() {
             tokio::spawn(async move {
                 state.world.remove_player(player).await;
@@ -821,6 +923,45 @@ impl Server {
                 None
             }
         }
+    }
+
+    /// Spawns a restore job per persisted ender pearl, each in its own world
+    /// (vanilla `ServerPlayer.loadAndSpawnEnderPearls`).
+    fn schedule_ender_pearl_restores(&self, player: &Arc<Player>, state: &DomainPlayerState) {
+        for pearl in Self::ender_pearls_to_restore(state) {
+            let Some(world) = self.resolve_pearl_world(&pearl.world, player) else {
+                continue;
+            };
+            if let Some(job) = EnderPearlRestoreJob::new(Arc::clone(player), world, pearl.entity) {
+                self.jobs.spawn(job);
+            }
+        }
+    }
+
+    fn ender_pearls_to_restore(state: &DomainPlayerState) -> Vec<PersistentEnderPearl> {
+        match &state.data {
+            DomainPlayerData::SavedRestored { data }
+            | DomainPlayerData::SavedWithoutLocation { data, .. } => data.ender_pearls.clone(),
+            DomainPlayerData::FirstVisit { .. } => Vec::new(),
+        }
+    }
+
+    fn resolve_pearl_world(&self, world_key: &str, player: &Player) -> Option<Arc<World>> {
+        let Ok(key) = world_key.parse::<Identifier>() else {
+            log::warn!(
+                "Saved ender pearl world {world_key} for player {} is invalid, skipping",
+                player.gameprofile.name
+            );
+            return None;
+        };
+        let Some(world) = self.worlds.get(&key) else {
+            log::warn!(
+                "Saved ender pearl world {key} for player {} is missing, skipping",
+                player.gameprofile.name
+            );
+            return None;
+        };
+        Some(world.clone())
     }
 
     fn send_login_packet(&self, player: &Player, world: &World) {

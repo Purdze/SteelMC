@@ -735,16 +735,16 @@ pub use movement_sync::{
     EntityRotationSyncState, EntityVelocitySyncState, POSITION_SYNC_THRESHOLD,
     PackedEntityRotation, ServerEntityMovementSyncState, ServerEntityMovementSyncUpdate,
 };
+pub use projectile::{
+    EntityHitResult, Projectile, ProjectileBase, ProjectileHit, ThrowableItemProjectile,
+    ThrowableProjectile, compute_margin,
+};
 #[cfg(test)]
 pub(crate) use registry::init_test_entities;
 pub use registry::{ENTITIES, EntityLoadRequest, EntityRegistry, init_entities};
 pub(crate) use shared_flags::EntitySharedFlags;
 pub(crate) use spawn::{AgeableMobGroupData, EntitySpawnReason, SpawnGroupData};
 pub(crate) use storage::EntityStorage;
-pub use projectile::{
-    EntityHitResult, Projectile, ProjectileBase, ProjectileHit, ThrowableItemProjectile,
-    ThrowableProjectile, compute_margin,
-};
 pub use synced_data::EntitySyncedData;
 pub(crate) use ticking::{
     snapshot_old_pos_and_rot_for_tick, tick_vehicle_passengers_with_ticked_if,

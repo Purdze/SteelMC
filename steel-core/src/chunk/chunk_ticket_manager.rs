@@ -330,9 +330,12 @@ impl ChunkTicketManager {
     /// Returns the minimum ticket level at position.
     #[must_use]
     pub fn get_ticket(&self, pos: ChunkPos) -> Option<ChunkTicketLevel> {
-        self.tickets
-            .get(&pos)
-            .and_then(|tickets| tickets.iter().map(|stored| stored.ticket.load_level()).min())
+        self.tickets.get(&pos).and_then(|tickets| {
+            tickets
+                .iter()
+                .map(|stored| stored.ticket.load_level())
+                .min()
+        })
     }
 
     /// Iterator over the tickets currently held at `pos`.

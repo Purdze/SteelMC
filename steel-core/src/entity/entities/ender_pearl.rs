@@ -6,16 +6,13 @@
 //! deals 5.0 `ender_pearl` damage, plays the teleport sound, and discards itself.
 //!
 //! The pearl refreshes a timeout chunk ticket (`TicketType.ENDER_PEARL`) each tick
-//! so it keeps flying across the simulation border.
-//!
-//! TODO (deferred follow-up — see plan): player-bound persistence (`ServerPlayer`
-//! `ender_pearls` set + NBT) is not yet implemented, so a pearl whose owner logs
-//! out is saved with its chunk rather than re-spawned on login.
+//! so it keeps flying across the simulation border, and is registered on its owning
+//! player so it persists with them and re-spawns on login (vanilla
+//! `ServerPlayer.enderPearls`).
 
 use std::sync::{Arc, Weak};
 
 use glam::DVec3;
-use steel_utils::ChunkPos;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
@@ -26,6 +23,7 @@ use steel_registry::items::ItemRef;
 use steel_registry::vanilla_entity_data::EnderPearlEntityData;
 use steel_registry::vanilla_game_rules::ENDER_PEARLS_VANISH_ON_DEATH;
 use steel_registry::{sound_events, vanilla_damage_types, vanilla_items};
+use steel_utils::ChunkPos;
 use steel_utils::locks::SyncMutex;
 
 use crate::chunk::chunk_map::ENDER_PEARL_TICKET_TIMEOUT;
@@ -83,6 +81,14 @@ impl EnderPearlEntity {
     /// Resolves the owner as an online player in `world`, if any.
     fn owner_player(&self, world: &Arc<World>) -> Option<Arc<Player>> {
         world.players.get_by_uuid(&self.owner_uuid()?)
+    }
+
+    /// Removes this pearl from its owner's persistence set when it hits or is
+    /// discarded (vanilla `ThrownEnderpearl.onRemoval` deregistration).
+    fn deregister_from_owner(&self, world: &Arc<World>) {
+        if let Some(player) = self.owner_player(world) {
+            player.deregister_ender_pearl(self.uuid());
+        }
     }
 
     /// Refreshes the chunk-loading ticket so the pearl keeps flying across the
@@ -179,6 +185,7 @@ impl Entity for EnderPearlEntity {
         };
 
         if self.should_vanish_on_owner_death(&world) {
+            self.deregister_from_owner(&world);
             self.set_removed(RemovalReason::Discarded);
             return;
         }
@@ -230,8 +237,8 @@ impl Projectile for EnderPearlEntity {
     fn on_hit_entity(&self, entity: &SharedEntity, _location: DVec3) {
         // Vanilla `ThrownEnderpearl.onHitEntity`: deal 0 damage with a `thrown`
         // source so the hit entity registers the impact without being hurt.
-        let mut damage = DamageSource::environment(&vanilla_damage_types::THROWN)
-            .with_direct_entity(self.id());
+        let mut damage =
+            DamageSource::environment(&vanilla_damage_types::THROWN).with_direct_entity(self.id());
         if let Some(owner) = self.get_owner() {
             damage = damage.with_causing_entity(owner.id());
         }
@@ -256,6 +263,7 @@ impl Projectile for EnderPearlEntity {
         {
             self.teleport_owner(&world, &player, teleport_pos);
         }
+        self.deregister_from_owner(&world);
         self.set_removed(RemovalReason::Discarded);
     }
 }

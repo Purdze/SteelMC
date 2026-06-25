@@ -105,6 +105,9 @@ pub struct PersistentPlayerData {
 
     /// Vanilla one-player root vehicle tree stored with the player instead of chunk data.
     pub root_vehicle: Option<PersistentRootVehicle>,
+
+    /// Vanilla in-flight ender pearls stored with the player (`ServerPlayer.enderPearls`).
+    pub ender_pearls: Vec<PersistentEnderPearl>,
 }
 
 /// A vanilla `RootVehicle` tree persisted with player data.
@@ -113,6 +116,18 @@ pub struct PersistentRootVehicle {
     /// UUID of the direct vehicle the player should reattach to.
     pub attach: [u8; 16],
     /// Root vehicle entity tree.
+    pub entity: PersistentEntity,
+}
+
+/// A thrown ender pearl persisted with its owning player.
+///
+/// Mirrors a vanilla `ender_pearls` list entry: the pearl entity plus the world
+/// it lives in (`ender_pearl_dimension`), so it re-spawns in its original world.
+#[derive(Debug, Clone)]
+pub struct PersistentEnderPearl {
+    /// Key of the world the pearl lives in.
+    pub world: String,
+    /// Serialized pearl entity.
     pub entity: PersistentEntity,
 }
 
@@ -182,6 +197,7 @@ impl PersistentPlayerData {
         };
         let root_vehicle = Self::root_vehicle_from_player(player)
             .or_else(|| player.pending_root_vehicle_for_current_world());
+        let ender_pearls = Self::ender_pearls_from_player(player);
 
         Self {
             pos: [pos.x, pos.y, pos.z],
@@ -221,7 +237,21 @@ impl PersistentPlayerData {
             experience_total,
             score,
             root_vehicle,
+            ender_pearls,
         }
+    }
+
+    /// Snapshots the player's live in-flight ender pearls for persistence.
+    fn ender_pearls_from_player(player: &Player) -> Vec<PersistentEnderPearl> {
+        player
+            .ender_pearls()
+            .iter()
+            .filter_map(|pearl| {
+                let world = pearl.level()?.key.to_string();
+                let entity = ChunkStorage::entity_tree_to_persistent(pearl)?;
+                Some(PersistentEnderPearl { world, entity })
+            })
+            .collect()
     }
 
     fn root_vehicle_from_player(player: &Player) -> Option<PersistentRootVehicle> {

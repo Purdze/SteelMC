@@ -10,6 +10,7 @@ use glam::DVec3;
 use steel_macros::item_behavior;
 use steel_protocol::packets::game::SoundSource;
 use steel_registry::{sound_events, vanilla_entities};
+use steel_utils::random::Random as _;
 
 use crate::behavior::context::{InteractionResult, UseItemContext};
 use crate::behavior::item::ItemBehavior;
@@ -29,8 +30,7 @@ impl ItemBehavior for EnderPearlItem {
         let player = context.player;
         let world = context.world;
 
-        // Vanilla throw pitch: 0.4 / (random * 0.4 + 0.8).
-        let pitch = 0.4 / (rand::random::<f32>() * 0.4 + 0.8);
+        let pitch = 0.4 / (world.random().lock().next_f32() * 0.4 + 0.8);
         world.play_sound_at(
             &sound_events::ENTITY_ENDER_PEARL_THROW,
             SoundSource::Neutral,

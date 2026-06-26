@@ -238,7 +238,7 @@ impl RootVehicleRestoreJob {
         world: Arc<World>,
         root_vehicle: &PersistentRootVehicle,
     ) -> Option<Self> {
-        let root_chunk = root_vehicle_chunk(root_vehicle)?;
+        let root_chunk = persistent_entity_chunk(&root_vehicle.entity)?;
         let request = world.chunk_map.request_chunk(
             root_chunk,
             ChunkStatus::StructureStarts,
@@ -287,16 +287,12 @@ impl ServerJob for RootVehicleRestoreJob {
     }
 }
 
-fn root_vehicle_chunk(root_vehicle: &PersistentRootVehicle) -> Option<ChunkPos> {
-    let pos = DVec3::new(
-        root_vehicle.entity.pos[0],
-        root_vehicle.entity.pos[1],
-        root_vehicle.entity.pos[2],
-    );
+fn persistent_entity_chunk(entity: &PersistentEntity) -> Option<ChunkPos> {
+    let pos = DVec3::new(entity.pos[0], entity.pos[1], entity.pos[2]);
     if !pos.x.is_finite() || !pos.y.is_finite() || !pos.z.is_finite() {
         tracing::warn!(
-            uuid = ?Uuid::from_bytes(root_vehicle.entity.uuid),
-            "Skipping persisted RootVehicle with non-finite root position {pos:?}",
+            uuid = ?Uuid::from_bytes(entity.uuid),
+            "Skipping persisted entity with non-finite position {pos:?}",
         );
         return None;
     }
@@ -308,7 +304,7 @@ fn restore_root_vehicle_for_player(
     world: &Arc<World>,
     root_vehicle: PersistentRootVehicle,
 ) {
-    let Some(root_chunk) = root_vehicle_chunk(&root_vehicle) else {
+    let Some(root_chunk) = persistent_entity_chunk(&root_vehicle.entity) else {
         return;
     };
     let level = Arc::downgrade(world);
@@ -376,7 +372,7 @@ struct EnderPearlRestoreJob {
 
 impl EnderPearlRestoreJob {
     fn new(player: Arc<Player>, world: Arc<World>, entity: PersistentEntity) -> Option<Self> {
-        let chunk = ender_pearl_chunk(&entity)?;
+        let chunk = persistent_entity_chunk(&entity)?;
         let request = world.chunk_map.request_chunk(
             chunk,
             ChunkStatus::StructureStarts,
@@ -417,24 +413,12 @@ impl ServerJob for EnderPearlRestoreJob {
     }
 }
 
-fn ender_pearl_chunk(entity: &PersistentEntity) -> Option<ChunkPos> {
-    let pos = DVec3::new(entity.pos[0], entity.pos[1], entity.pos[2]);
-    if !pos.x.is_finite() || !pos.y.is_finite() || !pos.z.is_finite() {
-        tracing::warn!(
-            uuid = ?Uuid::from_bytes(entity.uuid),
-            "Skipping persisted ender pearl with non-finite position {pos:?}",
-        );
-        return None;
-    }
-    Some(ChunkPos::from_entity_pos(pos))
-}
-
 fn restore_ender_pearl_for_player(
     player: &Arc<Player>,
     world: &Arc<World>,
     entity: &PersistentEntity,
 ) {
-    let Some(chunk) = ender_pearl_chunk(entity) else {
+    let Some(chunk) = persistent_entity_chunk(entity) else {
         return;
     };
     let level = Arc::downgrade(world);
@@ -459,7 +443,6 @@ fn restore_ender_pearl_for_player(
     for pearl in &entities {
         player.register_ender_pearl(pearl);
     }
-    // Vanilla re-places the ENDER_PEARL ticket when the pearl is loaded.
     world.chunk_map.place_ender_pearl_ticket(chunk);
     world.mark_chunk_dirty(chunk);
 }

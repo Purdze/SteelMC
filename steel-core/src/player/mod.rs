@@ -82,7 +82,6 @@ use uuid::Uuid;
 
 use arc_swap::ArcSwap;
 use steel_utils::locks::SyncMutex;
-use steel_utils::random::Random as _;
 use steel_utils::types::{Difficulty, GameType};
 use text_components::TextComponent;
 use text_components::resolving::TextResolutor;
@@ -1650,7 +1649,7 @@ impl Entity for Player {
     }
 
     fn fire_ignite_extra_ticks(&self) -> i32 {
-        self.get_world().random().lock().next_i32_between(1, 2)
+        rand::random_range(1..=2)
     }
 
     fn can_freeze(&self) -> bool {

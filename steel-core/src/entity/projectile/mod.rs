@@ -20,7 +20,6 @@ use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::{NbtCompound, NbtTag};
 use steel_utils::axis::Axis;
 use steel_utils::locks::SyncMutex;
-use steel_utils::random::Random as _;
 use steel_utils::{UuidExt, WorldAabb};
 use uuid::Uuid;
 
@@ -35,6 +34,11 @@ const SHOOT_INACCURACY_SCALE: f64 = 0.0172_275;
 
 /// Vanilla `ProjectileUtil.DEFAULT_ENTITY_HIT_RESULT_MARGIN`.
 const MAX_ENTITY_HIT_MARGIN: f64 = 0.3;
+
+/// Mirrors vanilla `RandomSource.triangle(mode, deviation)`.
+fn triangle_random(mode: f64, deviation: f64) -> f64 {
+    mode + deviation * (rand::random::<f64>() - rand::random::<f64>())
+}
 
 /// Result of a projectile move-vector raycast (vanilla `HitResult`).
 pub enum ProjectileHit {
@@ -190,14 +194,11 @@ pub trait Projectile: Entity {
     /// Returns vanilla `Projectile.getMovementToShoot`.
     fn get_movement_to_shoot(&self, direction: DVec3, power: f32, uncertainty: f32) -> DVec3 {
         let deviation = SHOOT_INACCURACY_SCALE * f64::from(uncertainty);
-        let jitter = {
-            let mut random = self.base().random().lock();
-            DVec3::new(
-                random.triangle(0.0, deviation),
-                random.triangle(0.0, deviation),
-                random.triangle(0.0, deviation),
-            )
-        };
+        let jitter = DVec3::new(
+            triangle_random(0.0, deviation),
+            triangle_random(0.0, deviation),
+            triangle_random(0.0, deviation),
+        );
         (direction.normalize_or_zero() + jitter) * f64::from(power)
     }
 

@@ -469,16 +469,72 @@ fn physics_state_for_move(entity: &dyn Entity) -> EntityPhysicsState {
     })
 }
 
+/// A contiguous block of session entity IDs.
+///
+/// Vanilla allocates one ID per `Entity`, but a multipart mob's sub-entities must
+/// occupy the IDs directly after the parent: the client synthesizes them at
+/// `parent_id + 1 ..= parent_id + n` in `EnderDragon.recreateFromPacket` and never
+/// receives spawn packets for them. Vanilla gets that contiguity for free because
+/// the parts are constructed inside the parent's constructor on a single thread;
+/// Steel ticks worlds in parallel, so parent and parts must come from one
+/// locked allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntityIdBlock {
+    first: i32,
+    count: u32,
+}
+
+impl EntityIdBlock {
+    /// Returns the ID of the entity that owns the block.
+    #[must_use]
+    pub const fn first(self) -> i32 {
+        self.first
+    }
+
+    /// Returns how many IDs the block reserves in total, including the owner.
+    #[must_use]
+    pub const fn len(self) -> u32 {
+        self.count
+    }
+
+    /// Returns whether the block reserves no IDs at all.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.count == 0
+    }
+
+    /// Returns the ID of the `index`-th sub-entity, i.e. `first() + index + 1`.
+    ///
+    /// This is the client-side contract: a multipart mob's parts always follow
+    /// their parent's ID in order.
+    #[must_use]
+    pub const fn part(self, index: u32) -> i32 {
+        self.first.wrapping_add(index.wrapping_add(1) as i32)
+    }
+}
+
+/// Reserves `count` consecutive entity IDs under a single lock acquisition.
+///
+/// Use this whenever an entity may own sub-entities; see [`EntityIdBlock`].
+#[must_use]
+pub fn reserve_entity_ids(count: u32) -> EntityIdBlock {
+    let mut counter = ENTITY_COUNTER.lock();
+    let first = *counter;
+    *counter = counter.wrapping_add(count as i32);
+    EntityIdBlock { first, count }
+}
+
 /// Allocates a new unique entity ID.
 ///
 /// This is the primary way to get entity IDs for spawning entities.
 /// Thread-safe through the shared counter lock.
+///
+/// Only valid for types that never own sub-entities. When the entity type is not
+/// statically known, reserve through the entity registry instead so a multipart
+/// type also claims the IDs its parts need.
 #[must_use]
 pub fn next_entity_id() -> i32 {
-    let mut counter = ENTITY_COUNTER.lock();
-    let id = *counter;
-    *counter = counter.wrapping_add(1);
-    id
+    reserve_entity_ids(1).first()
 }
 
 fn apply_block_effect_segment(
@@ -759,6 +815,7 @@ mod manager;
 mod mob;
 pub mod mob_effect;
 mod movement_sync;
+mod part;
 mod potion_contents;
 pub mod projectile;
 mod registry;
@@ -815,6 +872,7 @@ pub use movement_sync::{
     EntityRotationSyncState, EntityVelocitySyncState, POSITION_SYNC_THRESHOLD,
     PackedEntityRotation, ServerEntityMovementSyncState, ServerEntityMovementSyncUpdate,
 };
+pub use part::{PartEntity, PartEntityBase};
 pub(crate) use potion_contents::apply_potion_contents;
 pub use projectile::{
     EntityHitResult, Projectile, ProjectileBase, ProjectileDeflection, ProjectileEventSource,

@@ -1136,8 +1136,10 @@ fn closest_direction_with_blocked_neighbors(
 mod damage;
 mod equipment_and_freezing;
 mod fall_and_fluids;
+mod ids;
 mod living_state;
 mod movement;
+mod multipart;
 mod portals;
 mod riding_and_leashes;
 mod travel;

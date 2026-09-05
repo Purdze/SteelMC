@@ -35,6 +35,10 @@ use crate::world::World;
 
 /// Duration in ticks of the death animation before entity removal.
 pub const DEATH_DURATION: i32 = 20;
+/// Duration in ticks of the vanilla hurt animation.
+///
+/// Mirrors the literal `10` assigned to `LivingEntity.hurtDuration`.
+pub const HURT_DURATION_TICKS: i32 = 10;
 /// Vanilla default `SwingAnimation` duration in ticks.
 pub const DEFAULT_SWING_DURATION: i32 = 6;
 const INFINITE_EFFECT_DURATION: i32 = -1;
@@ -606,6 +610,10 @@ struct LivingEntityState {
     effects_dirty: bool,
     death_processed: bool,
     invulnerable_time: i32,
+    /// Vanilla `LivingEntity.hurtTime`.
+    hurt_time: i32,
+    /// Vanilla `LivingEntity.hurtDuration`.
+    hurt_duration: i32,
     last_hurt: f32,
     last_hurt_by_player: Option<Uuid>,
     last_hurt_by_player_memory_time: i32,
@@ -642,6 +650,8 @@ impl LivingEntityState {
             effects_dirty: false,
             death_processed: false,
             invulnerable_time: 0,
+            hurt_time: 0,
+            hurt_duration: 0,
             last_hurt: 0.0,
             last_hurt_by_player: None,
             last_hurt_by_player_memory_time: 0,
@@ -1483,6 +1493,33 @@ impl LivingEntityBase {
         }
     }
 
+    /// Decrements the vanilla hurt animation timer.
+    ///
+    /// Mirrors the `hurtTime` countdown in `LivingEntity.baseTick`.
+    pub fn decrement_hurt_time(&self) {
+        let mut state = self.state.lock();
+        if state.hurt_time > 0 {
+            state.hurt_time -= 1;
+        }
+    }
+
+    /// Returns vanilla `LivingEntity.hurtTime`.
+    #[must_use]
+    pub fn hurt_time(&self) -> i32 {
+        self.state.lock().hurt_time
+    }
+
+    /// Sets vanilla `LivingEntity.hurtTime`, used when restoring saved entities.
+    pub fn set_hurt_time(&self, hurt_time: i32) {
+        self.state.lock().hurt_time = hurt_time;
+    }
+
+    /// Returns vanilla `LivingEntity.hurtDuration`.
+    #[must_use]
+    pub fn hurt_duration(&self) -> i32 {
+        self.state.lock().hurt_duration
+    }
+
     /// Applies vanilla hurt cooldown bookkeeping.
     ///
     /// Returns `None` when damage should be ignored because death was already
@@ -1507,6 +1544,8 @@ impl LivingEntityBase {
         } else {
             state.last_hurt = amount;
             state.invulnerable_time = 20;
+            state.hurt_duration = HURT_DURATION_TICKS;
+            state.hurt_time = state.hurt_duration;
             Some((true, amount))
         }
     }
@@ -1611,6 +1650,17 @@ impl LivingEntityBase {
         if living_is_dead(&hurt_by) || tick_count - self.last_hurt_by_mob_timestamp() > 100 {
             self.set_last_hurt_by_mob(None, tick_count);
         }
+    }
+
+    /// Returns vanilla `LivingEntity.dead`.
+    ///
+    /// Vanilla guards `die` on this flag and only sets it inside
+    /// `handleKillingBlow`, which subclasses such as the Ender Dragon override to
+    /// stay alive for a death animation. The read and the write are therefore kept
+    /// separate; see [`Self::mark_death_processed`].
+    #[must_use]
+    pub fn is_death_processed(&self) -> bool {
+        self.state.lock().death_processed
     }
 
     /// Marks death side effects as processed.

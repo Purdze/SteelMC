@@ -1493,6 +1493,17 @@ impl LivingEntityBase {
         }
     }
 
+    /// Starts the vanilla hurt animation.
+    ///
+    /// Mirrors `hurtDuration = 10; hurtTime = hurtDuration;` in `LivingEntity.hurtServer`,
+    /// which vanilla runs *after* `actuallyHurt`, so death handling still observes the
+    /// previous animation state.
+    pub fn begin_hurt_animation(&self) {
+        let mut state = self.state.lock();
+        state.hurt_duration = HURT_DURATION_TICKS;
+        state.hurt_time = state.hurt_duration;
+    }
+
     /// Decrements the vanilla hurt animation timer.
     ///
     /// Mirrors the `hurtTime` countdown in `LivingEntity.baseTick`.
@@ -1507,11 +1518,6 @@ impl LivingEntityBase {
     #[must_use]
     pub fn hurt_time(&self) -> i32 {
         self.state.lock().hurt_time
-    }
-
-    /// Sets vanilla `LivingEntity.hurtTime`, used when restoring saved entities.
-    pub fn set_hurt_time(&self, hurt_time: i32) {
-        self.state.lock().hurt_time = hurt_time;
     }
 
     /// Returns vanilla `LivingEntity.hurtDuration`.
@@ -1544,8 +1550,6 @@ impl LivingEntityBase {
         } else {
             state.last_hurt = amount;
             state.invulnerable_time = 20;
-            state.hurt_duration = HURT_DURATION_TICKS;
-            state.hurt_time = state.hurt_duration;
             Some((true, amount))
         }
     }
@@ -1652,12 +1656,12 @@ impl LivingEntityBase {
         }
     }
 
-    /// Returns vanilla `LivingEntity.dead`.
+    /// Returns whether death side effects have already run.
     ///
-    /// Vanilla guards `die` on this flag and only sets it inside
-    /// `handleKillingBlow`, which subclasses such as the Ender Dragon override to
-    /// stay alive for a death animation. The read and the write are therefore kept
-    /// separate; see [`Self::mark_death_processed`].
+    /// Close to vanilla `LivingEntity.dead`, which guards `die`, but not identical:
+    /// Steel also gates [`Self::apply_damage_cooldown`] on it, and players set it
+    /// through their own death path. Treat it as "this entity has already died",
+    /// not as a faithful mirror of the vanilla field.
     #[must_use]
     pub fn is_death_processed(&self) -> bool {
         self.state.lock().death_processed

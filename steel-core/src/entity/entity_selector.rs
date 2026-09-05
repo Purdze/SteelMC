@@ -4,15 +4,7 @@
 //! Only the predicates Steel actually uses are ported; vanilla's remaining
 //! constants are added here as their callers land.
 
-use glam::DVec3;
-
 use super::Entity;
-
-/// Mirrors vanilla `EntitySelector.ENTITY_STILL_ALIVE`.
-#[must_use]
-pub fn entity_still_alive(entity: &dyn Entity) -> bool {
-    entity.is_alive()
-}
 
 /// Mirrors vanilla `EntitySelector.NO_CREATIVE_OR_SPECTATOR`.
 ///
@@ -23,10 +15,4 @@ pub fn no_creative_or_spectator(entity: &dyn Entity) -> bool {
     !entity
         .as_player()
         .is_some_and(|player| entity.is_spectator() || player.has_infinite_materials())
-}
-
-/// Mirrors vanilla `EntitySelector.withinDistance`.
-#[must_use]
-pub fn within_distance(entity: &dyn Entity, center: DVec3, distance: f64) -> bool {
-    entity.position().distance_squared(center) <= distance * distance
 }

@@ -332,7 +332,7 @@ fn partial_damage_within_the_cooldown_leaves_hurt_time_alone() {
 }
 
 #[test]
-fn death_runs_the_killing_blow_hook_exactly_once() {
+fn death_side_effects_run_only_once() {
     init_vanilla_registry();
     let entity = LivingFluidTestEntity::new_in_world(0.0, 0.0, true, test_world()).with_health(3.0);
     let source = DamageSource::environment(&vanilla_damage_types::GENERIC);
@@ -340,9 +340,13 @@ fn death_runs_the_killing_blow_hook_exactly_once() {
 
     assert!(entity.hurt(test_world(), &source, 4.0));
 
-    // The default `handle_killing_blow` is what marks the entity dead, so a second
-    // `die` is a no-op; bosses override the hook to survive their death animation.
     assert!(entity.living_base().is_death_processed());
+    assert_eq!(entity.pose(), EntityPose::Dying);
+
+    // `die` claims the death atomically, so a second call cannot re-run the side
+    // effects. Whether a subclass hook keeps the entity alive for an animation is
+    // that subclass's own contract, tested with it.
+    entity.set_pose(EntityPose::Standing);
     entity.die(&source);
-    assert!(entity.living_base().is_death_processed());
+    assert_eq!(entity.pose(), EntityPose::Standing);
 }

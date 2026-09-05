@@ -674,6 +674,9 @@ pub trait LivingEntity: Entity {
 
         self.before_actually_hurt(source, effective_amount);
         self.actually_hurt(world, source, effective_amount);
+        if took_full_damage {
+            self.living_base().begin_hurt_animation();
+        }
         self.resolve_mob_responsible_for_damage(world, source);
         self.resolve_player_responsible_for_damage(world, source);
 
@@ -949,7 +952,13 @@ pub trait LivingEntity: Entity {
 
     /// Processes vanilla living death side effects.
     fn die(&self, source: &DamageSource) {
-        if self.is_removed() || self.living_base().is_death_processed() {
+        if self.is_removed() {
+            return;
+        }
+        // Vanilla guards on `!this.dead` and sets the flag inside `handleKillingBlow`.
+        // Steel ticks worlds in parallel, so the test and the set stay one atomic
+        // step here and the hook keeps only the subclass-visible side effects.
+        if !self.living_base().mark_death_processed() {
             return;
         }
 
@@ -977,12 +986,11 @@ pub trait LivingEntity: Entity {
 
     /// Runs vanilla `LivingEntity.handleKillingBlow`.
     ///
-    /// The base implementation marks the entity as dead. Bosses that play a death
-    /// animation override this to stay alive instead; the Ender Dragon clamps its
-    /// health to one and enters its dying phase.
-    fn handle_killing_blow(&self) {
-        let _ = self.living_base().mark_death_processed();
-    }
+    /// Vanilla's body is `this.dead = true`, which [`Self::die`] has already done
+    /// atomically by the time this runs. The hook exists for the subclasses that
+    /// replace it: bosses playing a death animation clamp their health and enter a
+    /// dying state here instead of falling over.
+    fn handle_killing_blow(&self) {}
 
     /// Returns vanilla `LivingEntity.shouldDropLoot`.
     fn should_drop_loot(&self, world: &World) -> bool {
@@ -1887,15 +1895,17 @@ pub trait LivingEntity: Entity {
         self.default_tick();
         self.living_base().decrement_hurt_time();
         self.living_base().decrement_invulnerable_time();
-        self.tick_mob_effects();
-        self.detect_equipment_updates();
 
-        // Vanilla keeps running `aiStep` while dying, gated only on `isRemoved`.
-        // What stops is the AI: `isImmobile` returns `isDeadOrDying`, so `aiStep`
-        // skips `serverAiStep`. Death animations depend on still being moved.
+        // Vanilla runs `tickDeath` from `baseTick`, before `tickEffects`, and keeps
+        // running `aiStep` from `tick` gated only on `isRemoved`. What stops while
+        // dying is the AI: `isImmobile` returns `isDeadOrDying`, so `aiStep` skips
+        // `serverAiStep`. Death animations depend on still being moved.
         if self.is_dead_or_dying() {
             self.tick_death();
         }
+
+        self.tick_mob_effects();
+        self.detect_equipment_updates();
 
         if !self.is_removed() {
             self.ai_step();

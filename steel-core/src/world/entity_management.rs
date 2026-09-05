@@ -607,6 +607,13 @@ impl World {
     /// `Level.getEntities(Entity, AABB, Predicate)`, which intersection-tests each
     /// part rather than trusting the parent's box, and skips a part both when it *is*
     /// `except_id` and when its parent is.
+    ///
+    /// Vanilla's two bounded overloads disagree here: the predicate one above tests
+    /// each part's own box, while the `EntityTypeTest` one expands a matched parent
+    /// into its parts with no box test at all, so it can return a part that lies
+    /// outside the query. Steel has a single bounded query and follows the
+    /// intersection-testing rule for all of them, since a lookup returning entities
+    /// outside its own bounding box is the more surprising of the two behaviors.
     fn visit_parts_in_aabb(
         &self,
         aabb: &WorldAabb,
@@ -614,15 +621,29 @@ impl World {
         predicate: &mut impl FnMut(&dyn Entity) -> bool,
         mut visit: impl FnMut(&Arc<dyn PartEntity>) -> ControlFlow<()>,
     ) {
-        let entity_parts = self.entity_parts.lock();
-        for part in entity_parts.values() {
+        // Snapshot before filtering: `predicate` and `visit` come from the caller and
+        // may query the world again, and `parking_lot` mutexes are not reentrant, so
+        // running them under the lock risks deadlocking the world tick. The empty
+        // early-out keeps this allocation-free until a multipart entity exists.
+        let parts = {
+            let entity_parts = self.entity_parts.lock();
+            if entity_parts.is_empty() {
+                return;
+            }
+            entity_parts.values().cloned().collect::<Vec<_>>()
+        };
+
+        for part in &parts {
             if let Some(except_id) = except_id
                 && (part.id() == except_id
                     || part.parent().is_some_and(|parent| parent.id() == except_id))
             {
                 continue;
             }
-            if !aabb.intersects(part.bounding_box()) || !predicate(part.as_ref()) {
+            if part.is_removed()
+                || !aabb.intersects(part.bounding_box())
+                || !predicate(part.as_ref())
+            {
                 continue;
             }
             if visit(part).is_break() {

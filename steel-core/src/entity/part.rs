@@ -4,7 +4,7 @@
 //! that different regions can take different damage. The Ender Dragon is the only
 //! vanilla example.
 //!
-//! This version of vanilla has no shared base for those sub-entities —
+//! This version of vanilla has no shared base for those sub-entities:
 //! `EnderDragonPart extends Entity` directly, and every engine site that has to
 //! recognize one does so with `instanceof EnderDragonPart`. Steel instead follows
 //! `NeoForge`'s `PartEntity` shape, so world queries, damage redirection and the

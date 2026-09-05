@@ -242,3 +242,50 @@ fn parts_are_never_tracked_for_clients() {
         );
     }
 }
+
+#[test]
+fn a_multipart_entity_does_not_collide_with_its_own_parts() {
+    init_vanilla_registry();
+    let world = fresh_test_world("multipart_self_collision");
+    let entity = spawn_multipart(&world);
+
+    // Vanilla passes the moving entity as `except` to `Level.getEntities`, which drops
+    // a part both when it is `except` and when its parent is. `is_same_entity` carries
+    // that rule, and the collision predicate relies on it.
+    for part in entity.parts() {
+        assert!(
+            part.is_same_entity(entity.as_ref()),
+            "a part must report its parent as itself so collision can exclude it"
+        );
+    }
+
+    let found = world.get_entities_in_aabb_excluding(&spawn_area(), entity.as_ref(), |_| true);
+    assert!(found.is_empty());
+}
+
+#[test]
+fn removed_parts_drop_out_of_queries() {
+    init_vanilla_registry();
+    let world = fresh_test_world("multipart_removed_parts");
+    let entity = spawn_multipart(&world);
+    let removed = &entity.parts()[0];
+    let surviving = entity.parts()[1].id();
+
+    removed.set_removed(RemovalReason::Discarded);
+
+    let found_ids = world
+        .get_entities_in_aabb(&spawn_area())
+        .iter()
+        .map(|entity| entity.id())
+        .collect::<Vec<_>>();
+    assert!(!found_ids.contains(&removed.id()));
+    assert!(found_ids.contains(&surviving));
+}
+
+#[test]
+#[should_panic(expected = "part index outside the reserved block")]
+fn reading_past_the_reserved_block_is_rejected() {
+    // Silently returning the next entity's ID would corrupt both the parts map and
+    // the client's `parent + 1 + i` synthesis.
+    let _ = reserve_entity_ids(PART_COUNT + 1).part(PART_COUNT);
+}

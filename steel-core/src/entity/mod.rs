@@ -507,8 +507,18 @@ impl EntityIdBlock {
     ///
     /// This is the client-side contract: a multipart mob's parts always follow
     /// their parent's ID in order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is outside the reserved block. Reading past the end would
+    /// silently hand out an ID belonging to the next entity, so this is checked
+    /// rather than wrapped.
     #[must_use]
     pub const fn part(self, index: u32) -> i32 {
+        assert!(
+            index + 1 < self.count,
+            "part index outside the reserved block"
+        );
         self.first.wrapping_add(index.wrapping_add(1) as i32)
     }
 }

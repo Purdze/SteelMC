@@ -3,7 +3,9 @@ use std::sync::Arc;
 use glam::DVec3;
 use steel_registry::blocks::BlockRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::item_stack::ItemStack;
+use steel_registry::vanilla_game_rules::{BLOCK_EXPLOSION_DROP_DECAY, MOB_GRIEFING};
 use steel_registry::{
     init_vanilla_registry, vanilla_blocks, vanilla_damage_types, vanilla_entities, vanilla_items,
 };
@@ -11,9 +13,10 @@ use steel_utils::geometry::WorldAabb;
 use steel_utils::types::UpdateFlags;
 use steel_utils::{BlockPos, ChunkPos, Downcast as _};
 
-use super::{BlockInteraction, Explosion, SimpleExplosionDamageCalculator};
+use super::{BlockInteraction, Explosion, ExplosionInteraction, SimpleExplosionDamageCalculator};
 use crate::behavior::init_behaviors;
 use crate::block_entity::init_block_entities;
+use crate::entity::damage::DamageSource;
 use crate::entity::entities::ItemEntity;
 use crate::entity::{ENTITIES, SharedEntity, init_entities, next_entity_id};
 use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
@@ -48,19 +51,20 @@ fn explosion_at(
     Explosion::new(world, None, None, None, center, radius, false, interaction)
 }
 
-fn add_pig(world: &Arc<World>, position: DVec3) -> SharedEntity {
-    let pig = ENTITIES
+/// Spawns an entity into the world, the way `/summon` does.
+fn add_entity(world: &Arc<World>, entity_type: EntityTypeRef, position: DVec3) -> SharedEntity {
+    let entity = ENTITIES
         .create(
-            &vanilla_entities::PIG,
+            entity_type,
             next_entity_id(),
             position,
             Arc::downgrade(world),
         )
-        .expect("the generated factory should build a pig");
+        .expect("the generated factory should build the entity");
     world
-        .try_add_entity(Arc::clone(&pig))
-        .expect("the pig should be added");
-    pig
+        .try_add_entity(Arc::clone(&entity))
+        .expect("the entity should be added");
+    entity
 }
 
 fn health(entity: &SharedEntity) -> f32 {
@@ -104,7 +108,7 @@ fn blast_proof_blocks_survive_a_direct_hit() {
 #[test]
 fn a_blast_in_open_air_sees_all_of_an_entity() {
     let world = explosion_test_world("explosion_exposure_open");
-    let pig = add_pig(&world, DVec3::new(8.5, 80.0, 10.5));
+    let pig = add_entity(&world, &vanilla_entities::PIG, DVec3::new(8.5, 80.0, 10.5));
 
     let exposure = Explosion::seen_percent(&world, CENTER, pig.as_ref());
 
@@ -117,7 +121,7 @@ fn a_blast_in_open_air_sees_all_of_an_entity() {
 #[test]
 fn a_wall_hides_an_entity_from_the_blast() {
     let world = explosion_test_world("explosion_exposure_walled");
-    let pig = add_pig(&world, DVec3::new(8.5, 80.0, 11.5));
+    let pig = add_entity(&world, &vanilla_entities::PIG, DVec3::new(8.5, 80.0, 11.5));
     // A slab of stone straight through the line of sight, tall and wide enough that no
     // sample ray can go round it.
     for x in 4..14 {
@@ -138,7 +142,7 @@ fn a_wall_hides_an_entity_from_the_blast() {
 #[test]
 fn a_blast_hurts_and_shoves_a_nearby_entity() {
     let world = explosion_test_world("explosion_damage");
-    let pig = add_pig(&world, DVec3::new(10.5, 80.0, 8.5));
+    let pig = add_entity(&world, &vanilla_entities::PIG, DVec3::new(10.5, 80.0, 8.5));
     let health_before = health(&pig);
 
     explosion_at(&world, CENTER, 4.0, BlockInteraction::Keep).explode();
@@ -152,7 +156,11 @@ fn a_blast_hurts_and_shoves_a_nearby_entity() {
 fn a_blast_spares_an_entity_out_of_range() {
     let world = explosion_test_world("explosion_out_of_range");
     // Beyond `radius * 2`, which is where vanilla's falloff reaches zero.
-    let pig = add_pig(&world, DVec3::new(8.5, 80.0, 8.5 + 9.0));
+    let pig = add_entity(
+        &world,
+        &vanilla_entities::PIG,
+        DVec3::new(8.5, 80.0, 8.5 + 9.0),
+    );
     let health_before = health(&pig);
 
     explosion_at(&world, CENTER, 4.0, BlockInteraction::Keep).explode();
@@ -163,7 +171,7 @@ fn a_blast_spares_an_entity_out_of_range() {
 #[test]
 fn a_calculator_can_turn_entity_damage_off() {
     let world = explosion_test_world("explosion_no_entity_damage");
-    let pig = add_pig(&world, DVec3::new(10.5, 80.0, 8.5));
+    let pig = add_entity(&world, &vanilla_entities::PIG, DVec3::new(10.5, 80.0, 8.5));
     let health_before = health(&pig);
 
     Explosion::new(
@@ -291,7 +299,7 @@ fn decay_costs_a_blast_most_of_its_drops() {
     // `explosion_decay` loot function, which gives each item a 1-in-radius survival
     // roll. This is the test that proves that wire is actually connected.
     //
-    // Summed over several runs because a single blast's crater is jittered — the gap
+    // Summed over several runs because a single blast's crater is jittered; the gap
     // is large (roughly a quarter of the drops survive) but not deterministic.
     const RUNS: i32 = 8;
     let mut plain = 0;
@@ -390,4 +398,111 @@ fn an_exploded_container_spills_its_contents() {
         .map(ItemStack::count)
         .sum();
     assert_eq!(diamonds, 3, "the barrel's contents did not drop");
+}
+
+#[test]
+fn a_drop_decay_rule_picks_between_the_two_destroy_modes() {
+    let world = explosion_test_world("explosion_decay_rule");
+
+    assert_eq!(
+        ExplosionInteraction::Block.resolve(&world),
+        BlockInteraction::DestroyWithDecay
+    );
+
+    world.set_game_rule(&BLOCK_EXPLOSION_DROP_DECAY, false);
+    assert_eq!(
+        ExplosionInteraction::Block.resolve(&world),
+        BlockInteraction::Destroy
+    );
+}
+
+#[test]
+fn mob_griefing_suppresses_a_mob_blast_entirely() {
+    let world = explosion_test_world("explosion_mob_griefing");
+
+    assert_eq!(
+        ExplosionInteraction::Mob.resolve(&world),
+        BlockInteraction::DestroyWithDecay
+    );
+
+    // A mob's blast is the only one the gamerule can switch off outright.
+    world.set_game_rule(&MOB_GRIEFING, false);
+    assert_eq!(
+        ExplosionInteraction::Mob.resolve(&world),
+        BlockInteraction::Keep
+    );
+    assert_eq!(
+        ExplosionInteraction::Block.resolve(&world),
+        BlockInteraction::DestroyWithDecay
+    );
+}
+
+#[test]
+fn the_remaining_interactions_ignore_the_gamerules() {
+    let world = explosion_test_world("explosion_interaction_fixed");
+    world.set_game_rule(&MOB_GRIEFING, false);
+
+    assert_eq!(
+        ExplosionInteraction::None.resolve(&world),
+        BlockInteraction::Keep
+    );
+    assert_eq!(
+        ExplosionInteraction::Trigger.resolve(&world),
+        BlockInteraction::TriggerBlock
+    );
+}
+
+#[test]
+fn a_struck_crystal_is_destroyed_and_detonates() {
+    let world = stone_floor_world("explosion_crystal");
+    let crystal = add_entity(&world, &vanilla_entities::END_CRYSTAL, CENTER);
+
+    assert!(crystal.hurt(
+        &world,
+        &DamageSource::environment(&vanilla_damage_types::GENERIC),
+        1.0
+    ));
+
+    assert!(crystal.is_removed(), "the crystal survived being hit");
+    assert!(
+        world.get_block_state(BlockPos::new(8, FLOOR_Y, 8)).is_air(),
+        "the crystal did not crater the floor"
+    );
+}
+
+#[test]
+fn a_crystal_caught_in_a_blast_does_not_chain() {
+    let world = stone_floor_world("explosion_crystal_chain");
+    let crystal = add_entity(&world, &vanilla_entities::END_CRYSTAL, CENTER);
+
+    // An explosion-sourced hit removes the crystal without setting off another blast,
+    // which is what stops a ring of them detonating without end.
+    assert!(crystal.hurt(
+        &world,
+        &DamageSource::environment(&vanilla_damage_types::EXPLOSION),
+        1.0
+    ));
+
+    assert!(crystal.is_removed());
+    assert!(
+        !world.get_block_state(BlockPos::new(8, FLOOR_Y, 8)).is_air(),
+        "a chained crystal cratered the floor"
+    );
+}
+
+#[test]
+fn an_ordinary_attacker_still_breaks_a_crystal() {
+    let world = stone_floor_world("explosion_crystal_attacker");
+    let crystal = add_entity(&world, &vanilla_entities::END_CRYSTAL, CENTER);
+    let pig = add_entity(&world, &vanilla_entities::PIG, DVec3::new(12.5, 80.0, 8.5));
+
+    // The crystal refuses damage from an ender dragon specifically. That branch cannot
+    // be exercised here, because the dragon's entity type has no Rust implementation on this
+    // branch, so the factory cannot build one, but this proves the guard does not
+    // over-trigger and reject every attacker.
+    let source =
+        DamageSource::environment(&vanilla_damage_types::MOB_ATTACK).with_causing_entity(pig.id());
+
+    assert!(crystal.hurt(&world, &source, 10.0));
+    assert!(crystal.is_removed());
 }

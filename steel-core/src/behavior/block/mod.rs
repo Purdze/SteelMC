@@ -346,7 +346,7 @@ pub trait BlockBehavior: Send + Sync {
     ///
     /// Vanilla parity: `BlockBehaviour.onExplosionHit`. This is the dispatch point for
     /// everything an explosion does to a block, so an override that only wants to add
-    /// a reaction — a lever flipping, TNT priming — should call
+    /// a reaction (a lever flipping, TNT priming) should call
     /// [`Self::default_on_explosion_hit`] afterwards, the way vanilla calls `super`.
     ///
     /// `on_drop` collects the block's loot; the explosion merges the stacks before

@@ -330,8 +330,8 @@ pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
     ///
     /// Mirrors vanilla `Entity.getBlockExplosionResistance`, which returns the
     /// resistance it was handed unless a subclass lowers it. No Steel entity overrides
-    /// this yet — vanilla's are the wither skull and the TNT minecart, neither of which
-    /// exists here — but the hook is what an explosion's entity-based damage calculator
+    /// this yet; vanilla's are the wither skull and the TNT minecart, neither of which
+    /// exists here, but the hook is what an explosion's entity-based damage calculator
     /// dispatches through.
     fn block_explosion_resistance(
         &self,

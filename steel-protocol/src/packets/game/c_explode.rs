@@ -7,7 +7,7 @@ use steel_utils::random::weighted::Weighted;
 
 /// Tells the client an explosion happened, so it can play the effect.
 ///
-/// The server does not send the resulting block changes here — those arrive as ordinary
+/// The server does not send the resulting block changes here; those arrive as ordinary
 /// block updates. `player_knockback` differs per recipient, so this packet is built once
 /// per player rather than broadcast verbatim.
 #[derive(ClientPacket, WriteTo, Clone, Debug)]
@@ -69,7 +69,7 @@ mod tests {
             expected.extend_from_slice(&component.to_be_bytes());
         }
         expected.extend_from_slice(&4.0_f32.to_be_bytes());
-        // A big-endian i32, not a VarInt — this is the field a port gets wrong.
+        // A big-endian i32, not a VarInt; this is the field a port gets wrong.
         expected.extend_from_slice(&17_i32.to_be_bytes());
 
         expected.push(1);

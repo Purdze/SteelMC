@@ -59,7 +59,7 @@ pub trait ExplosionDamageCalculator: Send + Sync {
     /// Mirrors vanilla `getEntityDamageAmount`.
     ///
     /// Damage falls off with distance and with how much of the entity the blast could
-    /// actually see, then squares up again close in — which is why a direct hit is so
+    /// actually see, then squares up again close in, which is why a direct hit is so
     /// much worse than one a block away.
     fn entity_damage_amount(
         &self,
@@ -91,7 +91,7 @@ impl ExplosionDamageCalculator for DefaultExplosionDamageCalculator {}
 /// Mirrors vanilla `SimpleExplosionDamageCalculator`.
 ///
 /// Lets a caller turn block breaking or entity damage off wholesale, override the
-/// knockback, or name the only blocks that resist — which is how the respawn anchor and
+/// knockback, or name the only blocks that resist, which is how the respawn anchor and
 /// wither describe their blasts.
 pub struct SimpleExplosionDamageCalculator {
     explodes_blocks: bool,
@@ -166,8 +166,8 @@ impl ExplosionDamageCalculator for SimpleExplosionDamageCalculator {
 /// Mirrors vanilla `EntityBasedExplosionDamageCalculator`.
 ///
 /// Hands the two block questions to the entity that caused the blast. No Steel entity
-/// overrides those hooks yet — vanilla's are the wither skull and the TNT minecart,
-/// neither of which exists here — but the dispatch is what makes adding one a
+/// overrides those hooks yet; vanilla's are the wither skull and the TNT minecart,
+/// neither of which exists here, but the dispatch is what makes adding one a
 /// three-line override rather than a rework.
 pub struct EntityBasedExplosionDamageCalculator {
     source_id: i32,

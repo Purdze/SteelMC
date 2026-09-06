@@ -4,8 +4,8 @@
 //! two are merged: vanilla splits them only so the client can share the interface, and
 //! Steel is server-only.
 //!
-//! An [`Explosion`] is a short-lived value — built, [`Explosion::explode`]d, and
-//! dropped inside one call — so it holds its world and source outright rather than by
+//! An [`Explosion`] is a short-lived value: built, [`Explosion::explode`]d, and
+//! dropped inside one call, so it holds its world and source outright rather than by
 //! id, and its bookkeeping needs no locks.
 
 mod damage_calculator;
@@ -24,12 +24,22 @@ use rand::seq::SliceRandom as _;
 use rustc_hash::{FxHashMap, FxHashSet};
 use steel_math::lerp;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+use steel_registry::game_rules::GameRule;
 use steel_registry::item_stack::ItemStack;
-use steel_registry::vanilla_game_rules::MOB_GRIEFING;
+use steel_registry::particle_type::{ExplosionParticleInfo, ParticleData};
+use steel_registry::sound_event::SoundEventHolder;
+use steel_registry::vanilla_entity_type_tags::EntityTypeTag;
+use steel_registry::vanilla_game_rules::{
+    BLOCK_EXPLOSION_DROP_DECAY, MOB_EXPLOSION_DROP_DECAY, MOB_GRIEFING, TNT_EXPLOSION_DROP_DECAY,
+};
+use steel_registry::{REGISTRY, TaggedRegistryExt as _, sound_events, vanilla_particle_types};
 use steel_registry::{vanilla_attributes, vanilla_damage_types, vanilla_entities};
 use steel_utils::BlockPos;
 use steel_utils::geometry::WorldAabb;
+use steel_utils::random::weighted::Weighted;
 use steel_utils::types::{GameType, UpdateFlags};
+
+use steel_protocol::packets::game::CExplode;
 
 use crate::behavior::BLOCK_BEHAVIORS;
 use crate::behavior::blocks::FireBlock;
@@ -66,7 +76,7 @@ pub enum BlockInteraction {
     Destroy,
     /// Break blocks, but let the explosion-decay loot function eat most of the drops.
     DestroyWithDecay,
-    /// Break nothing, but let blocks react — how a wind charge flips a lever.
+    /// Break nothing, but let blocks react, as a wind charge flips a lever.
     TriggerBlock,
 }
 
@@ -183,7 +193,7 @@ impl Explosion {
         &self.damage_source
     }
 
-    /// Whoever is ultimately to blame for the blast — the player who lit the fuse
+    /// Whoever is ultimately to blame for the blast, the player who lit the fuse
     /// rather than the fuse. Mirrors vanilla `getIndirectSourceEntity`.
     #[must_use]
     pub const fn indirect_source_entity(&self) -> Option<&SharedEntity> {
@@ -410,6 +420,22 @@ impl Explosion {
         let knockback = direction * power;
         entity.push_impulse(knockback);
 
+        // A blast can take ownership of a projectile it deflects, so an arrow batted
+        // back by a wind charge is credited to whoever fired the charge.
+        if let Some(projectile) = entity.as_projectile()
+            && REGISTRY.entity_types.is_in_tag(
+                entity.entity_type(),
+                &EntityTypeTag::REDIRECTABLE_PROJECTILE,
+            )
+        {
+            let owner = self
+                .damage_source
+                .causing_entity_id
+                .and_then(|id| self.world.get_entity_by_id(id));
+            projectile.set_owner_entity(owner.as_ref());
+            return;
+        }
+
         // A player is told their own knockback in the packet instead, so the client can
         // start moving without waiting for a velocity update.
         if let Some(player) = entity.as_player()
@@ -565,7 +591,7 @@ fn default_damage_source(
 
 /// Mirrors vanilla `Explosion.getIndirectSourceEntity`.
 ///
-/// Walks past the thing that physically exploded to whoever is to blame for it — the
+/// Walks past the thing that physically exploded to whoever is to blame for it: the
 /// player who lit the TNT, or the shooter behind a projectile.
 fn indirect_source_entity(source: &SharedEntity) -> Option<SharedEntity> {
     if let Some(projectile) = source.as_projectile() {
@@ -576,4 +602,127 @@ fn indirect_source_entity(source: &SharedEntity) -> Option<SharedEntity> {
 
     // TODO: Credit whoever lit it once `PrimedTnt` exists; vanilla checks that first.
     source.as_living_entity().map(|_| Arc::clone(source))
+}
+
+/// How a caller wants an explosion to treat blocks, before the game rules weigh in.
+///
+/// Mirrors vanilla `Level.ExplosionInteraction`. This is the knob a caller turns;
+/// [`BlockInteraction`] is what it resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplosionInteraction {
+    /// Never touch blocks.
+    None,
+    /// A blast from a block, such as a bed in the wrong dimension.
+    Block,
+    /// A blast from a mob, which `mobGriefing` can switch off entirely.
+    Mob,
+    /// A blast from TNT.
+    Tnt,
+    /// A blast that only nudges blocks into reacting, such as a wind charge.
+    Trigger,
+}
+
+impl ExplosionInteraction {
+    /// Applies the game rules that decide what this blast may actually do.
+    ///
+    /// Mirrors the `switch` at the top of vanilla `ServerLevel.explode`. Each
+    /// destroying variant reads its own drop-decay rule, and a mob's blast is
+    /// suppressed wholesale when `mobGriefing` is off.
+    fn resolve(self, world: &World) -> BlockInteraction {
+        match self {
+            Self::None => BlockInteraction::Keep,
+            Self::Block => destroy_type(world, &BLOCK_EXPLOSION_DROP_DECAY),
+            Self::Mob => {
+                if world.get_game_rule(&MOB_GRIEFING) {
+                    destroy_type(world, &MOB_EXPLOSION_DROP_DECAY)
+                } else {
+                    BlockInteraction::Keep
+                }
+            }
+            Self::Tnt => destroy_type(world, &TNT_EXPLOSION_DROP_DECAY),
+            Self::Trigger => BlockInteraction::TriggerBlock,
+        }
+    }
+}
+
+/// Mirrors vanilla `ServerLevel.getDestroyType`.
+fn destroy_type(world: &World, rule: &GameRule<bool>) -> BlockInteraction {
+    if world.get_game_rule(rule) {
+        BlockInteraction::DestroyWithDecay
+    } else {
+        BlockInteraction::Destroy
+    }
+}
+
+/// The debris a blast paints, which no vanilla caller varies.
+fn default_block_particles() -> Vec<Weighted<ExplosionParticleInfo>> {
+    vec![
+        Weighted::unit(ExplosionParticleInfo::new(
+            ParticleData::simple(&vanilla_particle_types::POOF),
+            0.5,
+            ExplosionParticleInfo::DEFAULT_FACTOR,
+        )),
+        Weighted::unit(ExplosionParticleInfo::new(
+            ParticleData::simple(&vanilla_particle_types::SMOKE),
+            ExplosionParticleInfo::DEFAULT_FACTOR,
+            ExplosionParticleInfo::DEFAULT_FACTOR,
+        )),
+    ]
+}
+
+impl World {
+    /// Sets off an explosion and tells nearby clients about it.
+    ///
+    /// Mirrors vanilla `ServerLevel.explode`. Vanilla's widest overload also takes two
+    /// particle types, a debris list and a sound, but every vanilla caller passes the
+    /// defaults, so those are constants here rather than parameters nothing varies.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the vanilla ServerLevel.explode overload every caller uses"
+    )]
+    pub fn explode(
+        self: &Arc<Self>,
+        source: Option<SharedEntity>,
+        damage_source: Option<DamageSource>,
+        damage_calculator: Option<Box<dyn ExplosionDamageCalculator>>,
+        center: DVec3,
+        radius: f32,
+        fire: bool,
+        interaction: ExplosionInteraction,
+    ) {
+        let mut explosion = Explosion::new(
+            self,
+            source,
+            damage_source,
+            damage_calculator,
+            center,
+            radius,
+            fire,
+            interaction.resolve(self),
+        );
+        let block_count = explosion.explode();
+        let particle = if explosion.is_small() {
+            &vanilla_particle_types::EXPLOSION
+        } else {
+            &vanilla_particle_types::EXPLOSION_EMITTER
+        };
+
+        // Built per player rather than broadcast: each recipient is told only its own
+        // knockback, so the client can react without waiting for a velocity update.
+        self.players.iter_players(|_, player| {
+            if !Self::recipient_within_64_blocks_of(player.position(), center) {
+                return true;
+            }
+            player.send_packet(CExplode {
+                center,
+                radius,
+                block_count: i32::try_from(block_count).unwrap_or(i32::MAX),
+                player_knockback: explosion.hit_players().get(&player.id()).copied(),
+                explosion_particle: ParticleData::simple(particle),
+                explosion_sound: SoundEventHolder::registry(&sound_events::ENTITY_GENERIC_EXPLODE),
+                block_particles: default_block_particles(),
+            });
+            true
+        });
+    }
 }

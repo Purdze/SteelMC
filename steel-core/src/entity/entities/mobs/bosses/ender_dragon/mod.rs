@@ -32,21 +32,29 @@ use glam::DVec3;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
+use steel_math::trig;
 use steel_protocol::packets::game::SoundSource;
+use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
+use steel_registry::item_stack::ItemStack;
 use steel_registry::sound_event::SoundEventRef;
+use steel_registry::vanilla_block_tags::BlockTag;
 use steel_registry::vanilla_entity_data::EnderDragonEntityData;
-use steel_registry::{sound_events, vanilla_damage_type_tags};
+use steel_registry::vanilla_game_rules::MOB_GRIEFING;
+use steel_registry::{level_events, sound_events, vanilla_damage_type_tags, vanilla_damage_types};
+use steel_utils::geometry::WorldAabb;
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, Downcast as _, DowncastType, DowncastTypeKey, wrap_degrees};
 
+use crate::enchantment_helper::{self, EnchantmentPostAttackContext};
 use crate::entity::ai::node::Node;
 use crate::entity::ai::path::Path;
 use crate::entity::damage::DamageSource;
+use crate::entity::entities::EndCrystalEntity;
 use crate::entity::{
-    Entity, EntityBase, EntityBaseLoad, EntityPose, EntitySyncedData, LivingEntity,
-    LivingEntityBase, Mob, MobBase, MobEffectInstance, PartEntity, part_entity_id,
-    sync_dirty_mob_effects,
+    Entity, EntityBase, EntityBaseLoad, EntityEventSource as _, EntityPose, EntitySyncedData,
+    LivingEntity, LivingEntityBase, Mob, MobBase, MobEffectInstance, PartEntity, SharedEntity,
+    entity_selector, part_entity_id, sync_dirty_mob_effects,
 };
 use crate::physics::{MoveResult, MoverType};
 use crate::world::World;
@@ -54,10 +62,15 @@ use crate::world::World;
 /// The number of sub-entity hitboxes.
 const SUB_ENTITY_COUNT: usize = 8;
 /// Indices into `sub_entities`, in the vanilla construction order
-/// head, neck, body, tail x3, wing x2. The remaining names arrive with the
-/// per-part positioning math.
+/// head, neck, body, tail x3, wing x2.
 const HEAD: usize = 0;
+const NECK: usize = 1;
 const BODY: usize = 2;
+/// The first of the three tail segments, which are positioned in a loop.
+const TAIL_START: usize = 3;
+const TAIL_COUNT: usize = 3;
+const WING1: usize = 6;
+const WING2: usize = 7;
 
 /// Damage below this is dropped rather than applied.
 const MINIMUM_EFFECTIVE_DAMAGE: f32 = 0.01;
@@ -78,6 +91,29 @@ const IN_WALL_MOVE_SCALE: f64 = 0.8;
 /// Vertical velocity retained each tick.
 const VERTICAL_DRAG: f64 = 0.91;
 
+/// Damage a wing sweep deals on top of its knockback.
+const WING_DAMAGE: f32 = 5.0;
+/// Damage the head and neck deal on contact.
+const BITE_DAMAGE: f32 = 10.0;
+/// Lower bound on the squared horizontal distance used to scale knockback, which
+/// keeps an entity standing exactly under the body from being flung.
+const MINIMUM_KNOCKBACK_DISTANCE_SQR: f64 = 0.1;
+/// Horizontal knockback strength, applied over the *squared* distance.
+const KNOCKBACK_STRENGTH: f64 = 4.0;
+/// Vertical lift added to every wing shove.
+const KNOCKBACK_LIFT: f64 = 0.2;
+/// A target hit within this many ticks is only shoved, not bitten again.
+const REPEAT_ATTACK_GRACE_TICKS: i32 = 2;
+
+/// How far the dragon looks for a crystal to heal from.
+const CRYSTAL_SEARCH_RADIUS: f64 = 32.0;
+/// The crystal heals the dragon on ticks divisible by this.
+const CRYSTAL_HEAL_INTERVAL: i32 = 10;
+/// Health restored per healing tick.
+const CRYSTAL_HEAL_AMOUNT: f32 = 1.0;
+/// One tick in this many rescans for a nearer crystal.
+const CRYSTAL_RESCAN_CHANCE: i32 = 10;
+
 const DRAGON_PHASE_KEY: &str = "DragonPhase";
 const DRAGON_DEATH_TIME_KEY: &str = "DragonDeathTime";
 const SITTING_DAMAGE_RECEIVED_KEY: &str = "sitting_damage_received";
@@ -92,6 +128,17 @@ const SITTING_DAMAGE_RECEIVED_KEY: &str = "sitting_damage_received";
 #[must_use]
 pub const fn end_podium_location(origin: BlockPos) -> BlockPos {
     origin
+}
+
+/// Wraps an angle the way vanilla `EnderDragon.rotWrap` does.
+///
+/// Vanilla's is `(float)Mth.wrapDegrees(double)`, so it wraps in `f64` and narrows
+/// afterwards. Steel's [`wrap_degrees`] is `f32`-only, which moves the narrowing one
+/// step earlier. Unlike the trig tables that decide the flight graph's `floor`, this
+/// cannot change an observable — the inputs are yaw differences, and both widths wrap
+/// them to the same value.
+fn rot_wrap(degrees: f64) -> f32 {
+    wrap_degrees(degrees as f32)
 }
 
 /// The Ender Dragon.
@@ -130,6 +177,12 @@ pub struct EnderDragonEntity {
     /// Vanilla `nodes` and `nodeAdjacency`, built on first use because the layout
     /// samples the terrain.
     flight_graph: SyncMutex<Option<DragonFlightGraph>>,
+    /// Vanilla `nearestCrystal`, held as an entity id rather than a reference.
+    ///
+    /// Storing the crystal itself would mean an `Arc` cycle through the world and
+    /// would keep a destroyed crystal alive; vanilla instead nulls the field once the
+    /// crystal reports removed, which an id lookup reproduces for free.
+    nearest_crystal: SyncMutex<Option<i32>>,
 }
 
 // SAFETY: The owner-scoped type key uniquely identifies EnderDragonEntity.
@@ -191,6 +244,7 @@ impl EnderDragonEntity {
             in_wall: SyncMutex::new(false),
             fight_origin: SyncMutex::new(BlockPos::ZERO),
             flight_graph: SyncMutex::new(None),
+            nearest_crystal: SyncMutex::new(None),
         }
     }
 
@@ -347,6 +401,7 @@ impl EnderDragonEntity {
             return None;
         }
 
+        self.check_crystals(world);
         self.tick_flap_time();
         self.set_yaw(wrap_degrees(self.yaw()));
 
@@ -365,7 +420,333 @@ impl EnderDragonEntity {
 
         self.apply_effects_from_blocks();
         self.set_y_body_rot(self.yaw());
+        self.tick_parts(world);
         result
+    }
+
+    /// Heals the dragon from a nearby end crystal. Mirrors vanilla `checkCrystals`.
+    ///
+    /// The crystal is tracked by id, so a destroyed one simply stops resolving, which
+    /// is what vanilla's `isRemoved` check does with a reference.
+    fn check_crystals(&self, world: &World) {
+        let tracked = *self.nearest_crystal.lock();
+        if let Some(id) = tracked {
+            if world.get_accessible_entity_by_id(id).is_none() {
+                *self.nearest_crystal.lock() = None;
+            } else if self.tick_count() % CRYSTAL_HEAL_INTERVAL == 0
+                && self.get_health() < self.get_max_health()
+            {
+                self.set_health(self.get_health() + CRYSTAL_HEAL_AMOUNT);
+            }
+        }
+
+        if rand::random_range(0..CRYSTAL_RESCAN_CHANCE) != 0 {
+            return;
+        }
+
+        // Steel has no per-type entity index, so vanilla's `getEntitiesOfClass` becomes
+        // an area query filtered by downcast.
+        let search_area = self.bounding_box().inflate(CRYSTAL_SEARCH_RADIUS);
+        let position = self.position();
+
+        *self.nearest_crystal.lock() = world
+            .get_entities_in_aabb(&search_area)
+            .into_iter()
+            .filter(|entity| entity.as_ref().downcast_ref::<EndCrystalEntity>().is_some())
+            .min_by(|a, b| {
+                a.distance_to_sqr(position)
+                    .total_cmp(&b.distance_to_sqr(position))
+            })
+            .map(|crystal| crystal.id());
+    }
+
+    /// Places the eight hitboxes and runs the contact sweeps they drive.
+    ///
+    /// Vanilla's order is load-bearing and is reproduced exactly. The head and neck
+    /// damage sweep sits *between* positioning the body and positioning the head, so
+    /// it reads the head box from the previous tick; and `knock_back` centers on the
+    /// body box, which by then holds this tick's position.
+    fn tick_parts(&self, world: &Arc<World>) {
+        let old_positions: Vec<DVec3> = self
+            .sub_entities
+            .iter()
+            .map(|part| part.position())
+            .collect();
+
+        let (sample_5, sample_10) = {
+            let history = self.flight_history.lock();
+            (history.get(5), history.get(10))
+        };
+
+        // Every expression below is `f32` up to the point vanilla widens it, because
+        // the trig lookup indexes off the narrowed value. Doing the arithmetic in `f64`
+        // and narrowing afterwards would land on a different table entry.
+        let tilt = ((sample_5.y - sample_10.y) as f32 * 10.0).to_radians();
+        let cc_tilt = trig::cos(f64::from(tilt));
+        let ss_tilt = trig::sin(f64::from(tilt));
+        let yaw_radians = self.yaw().to_radians();
+        let ss1 = trig::sin(f64::from(yaw_radians));
+        let cc1 = trig::cos(f64::from(yaw_radians));
+
+        self.tick_part(
+            BODY,
+            DVec3::new(f64::from(ss1 * 0.5), 0.0, f64::from(-cc1 * 0.5)),
+        );
+        self.tick_part(
+            WING1,
+            DVec3::new(f64::from(cc1 * 4.5), 2.0, f64::from(ss1 * 4.5)),
+        );
+        self.tick_part(
+            WING2,
+            DVec3::new(f64::from(cc1 * -4.5), 2.0, f64::from(ss1 * -4.5)),
+        );
+
+        if self.hurt_time() == 0 {
+            self.sweep_wings(world);
+            self.sweep_bite(world);
+        }
+
+        let head_yaw = yaw_radians - *self.y_rot_a.lock() * 0.01;
+        let ss2 = trig::sin(f64::from(head_yaw));
+        let cc2 = trig::cos(f64::from(head_yaw));
+        let y_offset = self.head_y_offset(sample_5);
+        for (index, reach) in [(HEAD, 6.5_f32), (NECK, 5.5)] {
+            self.tick_part(
+                index,
+                DVec3::new(
+                    f64::from(ss2 * reach * cc_tilt),
+                    f64::from(y_offset + ss_tilt * reach),
+                    f64::from(-cc2 * reach * cc_tilt),
+                ),
+            );
+        }
+
+        self.tick_tail(sample_5, ss1, cc1, cc_tilt, ss_tilt);
+
+        // Non-short-circuiting `|`: every box must be scanned for its block-breaking
+        // side effect, not just until one reports a wall.
+        *self.in_wall.lock() = Self::check_walls(world, self.part_box(HEAD))
+            | Self::check_walls(world, self.part_box(NECK))
+            | Self::check_walls(world, self.part_box(BODY));
+        // TODO: Report to `EnderDragonFight::update_dragon` once the fight exists.
+
+        // Vanilla writes the pre-tick position into both `xo/yo/zo` and
+        // `xOld/yOld/zOld`, which is manual interpolation bookkeeping for entities that
+        // are never ticked themselves. Steel has a single `old_position`, so one write
+        // covers both.
+        for (part, old_position) in self.sub_entities.iter().zip(old_positions) {
+            part.set_old_position(old_position);
+        }
+    }
+
+    /// Places the three tail segments, which trail the body through flight history.
+    fn tick_tail(
+        &self,
+        sample_5: DragonFlightSample,
+        ss1: f32,
+        cc1: f32,
+        cc_tilt: f32,
+        ss_tilt: f32,
+    ) {
+        for index in 0..TAIL_COUNT {
+            let trailing = self.flight_history.lock().get(12 + index as i32 * 2);
+            // The yaw difference is taken in `f32` before it widens, as vanilla's is.
+            let rotation = self.yaw().to_radians()
+                + rot_wrap(f64::from(trailing.y_rot - sample_5.y_rot)).to_radians();
+            let ss = trig::sin(f64::from(rotation));
+            let cc = trig::cos(f64::from(rotation));
+            let distance = (index + 1) as f32 * 2.0;
+
+            self.tick_part(
+                TAIL_START + index,
+                DVec3::new(
+                    f64::from(-(ss1 * 1.5 + ss * distance) * cc_tilt),
+                    trailing.y - sample_5.y - f64::from((distance + 1.5) * ss_tilt) + 1.5,
+                    f64::from((cc1 * 1.5 + cc * distance) * cc_tilt),
+                ),
+            );
+        }
+    }
+
+    /// Moves one hitbox to an offset from the dragon. Mirrors vanilla `tickPart`.
+    fn tick_part(&self, index: usize, offset: DVec3) {
+        self.sub_entities[index].set_part_position(self.position() + offset);
+    }
+
+    /// Returns a hitbox's current bounding box.
+    fn part_box(&self, index: usize) -> WorldAabb {
+        self.sub_entities[index].bounding_box()
+    }
+
+    /// Mirrors vanilla `getHeadYOffset`.
+    ///
+    /// A perched dragon lowers its head to a fixed offset; a flying one lets the head
+    /// lag behind the body's recent climb.
+    fn head_y_offset(&self, sample_5: DragonFlightSample) -> f32 {
+        if self.phase_manager.current().is_sitting() {
+            return -1.0;
+        }
+        (sample_5.y - self.flight_history.lock().get(0).y) as f32
+    }
+
+    /// Mirrors vanilla's `level.getEntities(this, box, NO_CREATIVE_OR_SPECTATOR)`.
+    ///
+    /// Excluding the dragon also excludes its own parts, which is the reason
+    /// [`World::get_entities_in_aabb_excluding`] takes an entity rather than an id.
+    fn entities_touching(&self, world: &World, box_: WorldAabb) -> Vec<SharedEntity> {
+        world.get_entities_in_aabb_excluding(&box_, self, entity_selector::no_creative_or_spectator)
+    }
+
+    /// Shoves and cuts everything under either wing. Mirrors vanilla `knockBack`.
+    fn sweep_wings(&self, world: &Arc<World>) {
+        for wing in [WING1, WING2] {
+            let sweep = self
+                .part_box(wing)
+                .inflate_xyz(4.0, 2.0, 4.0)
+                .translate(DVec3::new(0.0, -2.0, 0.0));
+            self.knock_back(world, &self.entities_touching(world, sweep));
+        }
+    }
+
+    /// Bites everything against the head and neck. Mirrors vanilla `hurt(level, list)`.
+    fn sweep_bite(&self, world: &Arc<World>) {
+        for part in [HEAD, NECK] {
+            let sweep = self.part_box(part).inflate(1.0);
+            self.hurt_entities(world, &self.entities_touching(world, sweep));
+        }
+    }
+
+    /// Mirrors vanilla `knockBack`.
+    ///
+    /// The shove lands on every living entity, but the damage additionally needs the
+    /// dragon to be airborne and the target not to have been hit moments ago.
+    fn knock_back(&self, world: &Arc<World>, entities: &[SharedEntity]) {
+        let body = self.part_box(BODY);
+        let center_x = f64::midpoint(body.min_x(), body.max_x());
+        let center_z = f64::midpoint(body.min_z(), body.max_z());
+        let sitting = self.phase_manager.current().is_sitting();
+
+        for entity in entities {
+            let Some(living) = entity.as_living_entity() else {
+                continue;
+            };
+
+            let position = entity.position();
+            let xd = position.x - center_x;
+            let zd = position.z - center_z;
+            // Vanilla divides by the *squared* distance rather than normalizing, so the
+            // shove weakens sharply with range instead of staying constant.
+            let distance_sqr = (xd * xd + zd * zd).max(MINIMUM_KNOCKBACK_DISTANCE_SQR);
+            entity.push_impulse(DVec3::new(
+                xd / distance_sqr * KNOCKBACK_STRENGTH,
+                KNOCKBACK_LIFT,
+                zd / distance_sqr * KNOCKBACK_STRENGTH,
+            ));
+
+            if sitting
+                || living.last_hurt_by_mob_timestamp()
+                    >= entity.tick_count() - REPEAT_ATTACK_GRACE_TICKS
+            {
+                continue;
+            }
+            self.attack(world, entity, WING_DAMAGE);
+        }
+    }
+
+    /// Mirrors vanilla `EnderDragon.hurt(ServerLevel, List<Entity>)`.
+    ///
+    /// Renamed for the same reason as [`Self::hurt_part`]: Rust has no overloading and
+    /// the vanilla name collides with `Entity::hurt`.
+    fn hurt_entities(&self, world: &Arc<World>, entities: &[SharedEntity]) {
+        for entity in entities {
+            if entity.as_living_entity().is_some() {
+                self.attack(world, entity, BITE_DAMAGE);
+            }
+        }
+    }
+
+    /// Applies one contact hit, including the post-attack enchantment effects.
+    fn attack(&self, world: &Arc<World>, target: &SharedEntity, damage: f32) {
+        let source = self.mob_attack_damage_source();
+        target.hurt(world, &source, damage);
+
+        let attacker = self.as_entity_event_source();
+        let context = EnchantmentPostAttackContext::new(
+            target.as_ref(),
+            Some(attacker),
+            Some(attacker),
+            &source,
+        );
+        enchantment_helper::do_post_attack_effects_with_item_source(
+            world,
+            target.as_ref(),
+            &ItemStack::empty(),
+            &context,
+        );
+    }
+
+    /// Builds vanilla's `damageSources().mobAttack(this)`.
+    ///
+    /// Deliberately not `Mob::mob_attack_damage_source`, which derives the damage type
+    /// from a held weapon; vanilla's dragon always attacks as a bare mob.
+    fn mob_attack_damage_source(&self) -> DamageSource {
+        DamageSource::environment(&vanilla_damage_types::MOB_ATTACK)
+            .with_causing_entity(self.id())
+            .with_direct_entity(self.id())
+            .with_source_position(self.position())
+    }
+
+    /// Carves through, or bumps into, everything inside one hitbox.
+    ///
+    /// Mirrors vanilla `checkWalls`. Returns whether the dragon hit something it could
+    /// not break, which is what stalls it; blocks that *were* broken are reported to
+    /// clients as particles instead.
+    fn check_walls(world: &Arc<World>, box_: WorldAabb) -> bool {
+        let min = BlockPos::containing(box_.min_x(), box_.min_y(), box_.min_z());
+        let max = BlockPos::containing(box_.max_x(), box_.max_y(), box_.max_z());
+
+        // Vanilla re-reads the game rule for every block. That takes a level-data read
+        // lock, and the body box alone spans dozens of blocks each tick, so the
+        // loop-invariant read is hoisted; the result is identical either way.
+        let griefing = world.get_game_rule(&MOB_GRIEFING);
+        let mut hit_wall = false;
+        let mut destroyed = false;
+
+        for x in min.x()..=max.x() {
+            for y in min.y()..=max.y() {
+                for z in min.z()..=max.z() {
+                    let pos = BlockPos::new(x, y, z);
+                    let state = world.get_block_state(pos);
+                    let block = state.get_block();
+                    if state.is_air() || block.has_tag(&BlockTag::DRAGON_TRANSPARENT) {
+                        continue;
+                    }
+
+                    if griefing && !block.has_tag(&BlockTag::DRAGON_IMMUNE) {
+                        destroyed |= world.remove_block(pos, false);
+                    } else {
+                        hit_wall = true;
+                    }
+                }
+            }
+        }
+
+        if destroyed {
+            let between = |low: i32, high: i32| low + rand::random_range(0..=high - low);
+            let particle_pos = BlockPos::new(
+                between(min.x(), max.x()),
+                between(min.y(), max.y()),
+                between(min.z(), max.z()),
+            );
+            world.level_event(
+                level_events::PARTICLES_DRAGON_BLOCK_BREAK,
+                particle_pos,
+                0,
+                None,
+            );
+        }
+
+        hit_wall
     }
 
     /// Returns the dragon's yaw.
@@ -447,11 +828,18 @@ impl EnderDragonEntity {
 
         let aim = (target - position).normalize_or_zero();
         let yaw_radians = f64::from(self.yaw().to_radians());
-        let heading = DVec3::new(yaw_radians.sin(), self.velocity().y, -yaw_radians.cos())
-            .normalize_or_zero();
+        let heading = DVec3::new(
+            f64::from(trig::sin(yaw_radians)),
+            self.velocity().y,
+            f64::from(-trig::cos(yaw_radians)),
+        )
+        .normalize_or_zero();
         let alignment = (((heading.dot(aim) as f32) + 0.5) / 1.5).max(0.0);
 
         if dx.abs() > STEERING_EPSILON || dz.abs() > STEERING_EPSILON {
+            // TODO: Vanilla uses `Mth.atan2`, a table approximation that `steel-math`
+            // does not port yet; `f64::atan2` is exact and so turns fractionally
+            // differently.
             let desired = wrap_degrees(180.0 - (dx.atan2(dz) as f32).to_degrees() - self.yaw())
                 .clamp(-MAX_TURN_DEGREES, MAX_TURN_DEGREES);
             let mut y_rot_a = self.y_rot_a.lock();

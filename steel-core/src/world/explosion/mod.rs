@@ -20,15 +20,21 @@ pub use damage_calculator::{
 use std::sync::Arc;
 
 use glam::DVec3;
+use rand::seq::SliceRandom as _;
 use rustc_hash::{FxHashMap, FxHashSet};
 use steel_math::lerp;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+use steel_registry::item_stack::ItemStack;
+use steel_registry::vanilla_game_rules::MOB_GRIEFING;
 use steel_registry::{vanilla_attributes, vanilla_damage_types, vanilla_entities};
 use steel_utils::BlockPos;
 use steel_utils::geometry::WorldAabb;
-use steel_utils::types::GameType;
+use steel_utils::types::{GameType, UpdateFlags};
 
+use crate::behavior::BLOCK_BEHAVIORS;
+use crate::behavior::blocks::FireBlock;
 use crate::entity::damage::DamageSource;
+use crate::entity::entities::ItemEntity;
 use crate::entity::{Entity, SharedEntity};
 use crate::world::World;
 use crate::world::raycast::{ClipBlockShape, ClipFluid};
@@ -43,6 +49,10 @@ const RAY_STEP_DECAY: f32 = 0.225_000_01;
 /// A ray starts somewhere in `radius * [0.7, 1.3)`, which is what makes craters ragged.
 const RAY_POWER_JITTER: f32 = 0.6;
 const RAY_POWER_FLOOR: f32 = 0.7;
+/// One in this many destroyed positions catches fire, when the blast makes fire.
+const FIRE_CHANCE: i32 = 3;
+/// Vanilla caps an exploded drop stack well below its normal maximum.
+const MAX_DROPS_PER_COMBINED_STACK: i32 = 16;
 /// A blast smaller than this does not bother looking for entities.
 const MINIMUM_DAMAGING_RADIUS: f32 = 1.0e-5;
 
@@ -82,13 +92,11 @@ pub struct Explosion {
     center: DVec3,
     radius: f32,
     /// Whether the blast leaves fires behind.
-    #[expect(
-        dead_code,
-        reason = "read by `create_fire`, which arrives with block interaction"
-    )]
     fire: bool,
     block_interaction: BlockInteraction,
     source: Option<SharedEntity>,
+    /// Whoever is ultimately to blame, which is not always what physically exploded.
+    indirect_source: Option<SharedEntity>,
     damage_source: DamageSource,
     damage_calculator: Box<dyn ExplosionDamageCalculator>,
     /// Knockback owed to each player, keyed by entity id.
@@ -116,8 +124,10 @@ impl Explosion {
         fire: bool,
         block_interaction: BlockInteraction,
     ) -> Self {
-        let damage_source =
-            damage_source.unwrap_or_else(|| default_damage_source(source.as_ref(), center));
+        let indirect_source = source.as_ref().and_then(indirect_source_entity);
+        let damage_source = damage_source.unwrap_or_else(|| {
+            default_damage_source(source.as_ref(), indirect_source.as_ref(), center)
+        });
         let damage_calculator = damage_calculator.unwrap_or_else(|| match source.as_ref() {
             Some(source) => Box::new(EntityBasedExplosionDamageCalculator::new(source.id())),
             None => Box::new(DefaultExplosionDamageCalculator),
@@ -130,6 +140,7 @@ impl Explosion {
             fire,
             block_interaction,
             source,
+            indirect_source,
             damage_source,
             damage_calculator,
             hit_players: FxHashMap::default(),
@@ -170,6 +181,40 @@ impl Explosion {
     #[must_use]
     pub const fn damage_source(&self) -> &DamageSource {
         &self.damage_source
+    }
+
+    /// Whoever is ultimately to blame for the blast — the player who lit the fuse
+    /// rather than the fuse. Mirrors vanilla `getIndirectSourceEntity`.
+    #[must_use]
+    pub const fn indirect_source_entity(&self) -> Option<&SharedEntity> {
+        self.indirect_source.as_ref()
+    }
+
+    /// Whether the blast traces back to a player.
+    #[must_use]
+    pub fn is_caused_by_player(&self) -> bool {
+        self.indirect_source
+            .as_ref()
+            .is_some_and(|entity| entity.as_player().is_some())
+    }
+
+    /// Whether blocks may react to the blast without being broken by it.
+    ///
+    /// Mirrors vanilla `canTriggerBlocks`, which is what flips a lever caught in a
+    /// wind charge. A breeze's charge is additionally gated on `mobGriefing`.
+    #[must_use]
+    pub fn can_trigger_blocks(&self) -> bool {
+        if self.block_interaction != BlockInteraction::TriggerBlock {
+            return false;
+        }
+        if self
+            .source
+            .as_ref()
+            .is_none_or(|source| source.entity_type() != &vanilla_entities::BREEZE_WIND_CHARGE)
+        {
+            return true;
+        }
+        self.world.get_game_rule(&MOB_GRIEFING)
     }
 
     /// The knockback each player is owed, keyed by entity id.
@@ -375,15 +420,110 @@ impl Explosion {
         }
     }
 
+    /// Hands every reached block to its behavior, then spawns the merged drops.
+    ///
+    /// Mirrors vanilla `interactWithBlocks`. The positions are shuffled first so a
+    /// crater's item stacks are not all attributed to its lowest corner.
+    fn interact_with_blocks(&self, reached: &[BlockPos]) {
+        let mut shuffled = reached.to_vec();
+        shuffled.shuffle(&mut rand::rng());
+
+        let mut collectors: Vec<StackCollector> = Vec::new();
+        for &pos in &shuffled {
+            let state = self.world.get_block_state(pos);
+            BLOCK_BEHAVIORS
+                .get_behavior(state.get_block())
+                .on_explosion_hit(state, &self.world, pos, self, &mut |stack, pos| {
+                    collect_drop(&mut collectors, stack, pos);
+                });
+        }
+
+        for collector in collectors {
+            self.world.pop_resource(collector.pos, collector.stack);
+        }
+    }
+
+    /// Scatters fire across the crater. Mirrors vanilla `createFire`.
+    fn create_fire(&self, reached: &[BlockPos]) {
+        for &pos in reached {
+            if rand::random_range(0..FIRE_CHANCE) != 0 {
+                continue;
+            }
+            if !self.world.get_block_state(pos).is_air()
+                || !self.world.get_block_state(pos.below()).is_solid_render()
+            {
+                continue;
+            }
+            self.world.set_block(
+                pos,
+                FireBlock::get_state(self.world.as_ref(), pos),
+                UpdateFlags::UPDATE_ALL,
+            );
+        }
+    }
+
     /// Runs the explosion, returning how many blocks it destroyed.
     ///
-    /// Mirrors vanilla `explode`. Block interaction lands in a later commit; the count
-    /// is already the one the client packet needs.
+    /// Mirrors vanilla `explode`, including its ordering: the block list is computed
+    /// before anything is damaged, so entities are hurt against the terrain as it stood
+    /// when the blast went off.
     pub fn explode(&mut self) -> usize {
         let reached = self.calculate_exploded_positions();
         self.hurt_entities();
-        // TODO: Break the reached blocks and place fire once `on_explosion_hit` lands.
+
+        if self.block_interaction.interacts_with_blocks() {
+            self.interact_with_blocks(&reached);
+        }
+        if self.fire {
+            self.create_fire(&reached);
+        }
+
         reached.len()
+    }
+}
+
+/// One position's worth of drops, merged with everything compatible near it.
+struct StackCollector {
+    pos: BlockPos,
+    stack: ItemStack,
+}
+
+/// Folds `stack` into an existing collector where it fits, else starts a new one.
+///
+/// Mirrors vanilla `addOrAppendStack`. Merging is what stops a large crater spawning
+/// one item entity per block broken.
+fn collect_drop(collectors: &mut Vec<StackCollector>, mut stack: ItemStack, pos: BlockPos) {
+    for collector in collectors.iter_mut() {
+        collector.try_merge(&mut stack);
+        if stack.is_empty() {
+            return;
+        }
+    }
+
+    collectors.push(StackCollector { pos, stack });
+}
+
+impl StackCollector {
+    /// Moves as much of `incoming` into this stack as vanilla's cap allows.
+    fn try_merge(&mut self, incoming: &mut ItemStack) {
+        if !ItemEntity::are_mergeable(&self.stack, incoming) {
+            return;
+        }
+
+        // Vanilla gates on the full stack size but transfers at most 16, so exploded
+        // drops arrive in small stacks even for items that stack to 64.
+        let capacity = self
+            .stack
+            .max_stack_size()
+            .min(MAX_DROPS_PER_COMBINED_STACK)
+            - self.stack.count();
+        let moved = capacity.min(incoming.count());
+        if moved <= 0 {
+            return;
+        }
+
+        self.stack = self.stack.copy_with_count(self.stack.count() + moved);
+        incoming.shrink(moved);
     }
 }
 
@@ -402,12 +542,12 @@ fn grid_axis_direction(coordinate: i32) -> f64 {
 ///
 /// A blast traced back to a player reports as `PLAYER_EXPLOSION`, which is what gives
 /// the death message a name in it.
-fn default_damage_source(source: Option<&SharedEntity>, center: DVec3) -> DamageSource {
-    let indirect = source.and_then(indirect_source_entity);
-    let damage_type = if indirect
-        .as_ref()
-        .is_some_and(|entity| entity.as_player().is_some())
-    {
+fn default_damage_source(
+    source: Option<&SharedEntity>,
+    indirect: Option<&SharedEntity>,
+    center: DVec3,
+) -> DamageSource {
+    let damage_type = if indirect.is_some_and(|entity| entity.as_player().is_some()) {
         &vanilla_damage_types::PLAYER_EXPLOSION
     } else {
         &vanilla_damage_types::EXPLOSION

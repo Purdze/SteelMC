@@ -13,12 +13,17 @@
 //! its own copy of the phase machine off the synced phase id, so keeping that id
 //! correct is what makes the visuals right.
 
+mod flight_history;
 mod part;
+mod phases;
 #[cfg(test)]
 mod tests;
 
+pub use flight_history::{DragonFlightHistory, DragonFlightSample};
 pub use part::EnderDragonPart;
+pub use phases::{DragonPhaseInstance, EnderDragonPhase, EnderDragonPhaseManager};
 
+use std::f32::consts::TAU;
 use std::sync::{Arc, Weak};
 
 use glam::DVec3;
@@ -28,10 +33,10 @@ use steel_macros::entity_behavior;
 use steel_protocol::packets::game::SoundSource;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
 use steel_registry::sound_event::SoundEventRef;
-use steel_registry::sound_events;
 use steel_registry::vanilla_entity_data::EnderDragonEntityData;
+use steel_registry::{sound_events, vanilla_damage_type_tags};
 use steel_utils::locks::SyncMutex;
-use steel_utils::{Downcast as _, DowncastType, DowncastTypeKey};
+use steel_utils::{Downcast as _, DowncastType, DowncastTypeKey, wrap_degrees};
 
 use crate::entity::damage::DamageSource;
 use crate::entity::{
@@ -39,6 +44,7 @@ use crate::entity::{
     LivingEntityBase, Mob, MobBase, MobEffectInstance, PartEntity, part_entity_id,
     sync_dirty_mob_effects,
 };
+use crate::physics::{MoveResult, MoverType};
 use crate::world::World;
 
 /// The number of sub-entity hitboxes.
@@ -49,6 +55,26 @@ const SUB_ENTITY_COUNT: usize = 8;
 const HEAD: usize = 0;
 const BODY: usize = 2;
 
+/// Damage below this is dropped rather than applied.
+const MINIMUM_EFFECTIVE_DAMAGE: f32 = 0.01;
+/// Share of max health that dislodges a perched dragon.
+const SITTING_ALLOWED_DAMAGE_FRACTION: f32 = 0.25;
+/// Wing beat while perched, where the flight-speed formula does not apply.
+const SITTING_FLAP_RATE: f32 = 0.1;
+/// Wings held mid-beat while the dragon has no AI.
+const NO_AI_FLAP_TIME: f32 = 0.5;
+/// Forward thrust per tick, scaled by how well the dragon is already aimed.
+const FORWARD_THRUST: f32 = 0.06;
+/// Turn rate ceiling per tick, in degrees.
+const MAX_TURN_DEGREES: f32 = 50.0;
+/// Below this the dragon is close enough on an axis not to bother turning.
+const STEERING_EPSILON: f64 = 1.0e-5;
+/// Movement scale while clipping terrain.
+const IN_WALL_MOVE_SCALE: f64 = 0.8;
+/// Vertical velocity retained each tick.
+const VERTICAL_DRAG: f64 = 0.91;
+
+const DRAGON_PHASE_KEY: &str = "DragonPhase";
 const DRAGON_DEATH_TIME_KEY: &str = "DragonDeathTime";
 const SITTING_DAMAGE_RECEIVED_KEY: &str = "sitting_damage_received";
 
@@ -66,6 +92,20 @@ pub struct EnderDragonEntity {
     dragon_death_time: SyncMutex<i32>,
     /// Vanilla `sittingDamageReceived`.
     sitting_damage_received: SyncMutex<f32>,
+    /// Vanilla `flightHistory`.
+    flight_history: SyncMutex<DragonFlightHistory>,
+    /// Vanilla `phaseManager`.
+    phase_manager: EnderDragonPhaseManager,
+    /// Vanilla `flapTime` and `oFlapTime`.
+    ///
+    /// Cosmetic in itself, but `is_flapping` reads it and that drives the FLAP game
+    /// event from inside the shared move path.
+    flap_time: SyncMutex<f32>,
+    o_flap_time: SyncMutex<f32>,
+    /// Vanilla `yRotA`, the accumulated turn rate.
+    y_rot_a: SyncMutex<f32>,
+    /// Vanilla `inWall`, set by the wall scan once that lands.
+    in_wall: SyncMutex<bool>,
 }
 
 // SAFETY: The owner-scoped type key uniquely identifies EnderDragonEntity.
@@ -119,6 +159,12 @@ impl EnderDragonEntity {
             entity_data: SyncMutex::new(entity_data),
             dragon_death_time: SyncMutex::new(0),
             sitting_damage_received: SyncMutex::new(0.0),
+            flight_history: SyncMutex::new(DragonFlightHistory::new()),
+            phase_manager: EnderDragonPhaseManager::new(),
+            flap_time: SyncMutex::new(0.0),
+            o_flap_time: SyncMutex::new(0.0),
+            y_rot_a: SyncMutex::new(0.0),
+            in_wall: SyncMutex::new(false),
         }
     }
 
@@ -175,6 +221,193 @@ impl EnderDragonEntity {
         *self.dragon_death_time.lock()
     }
 
+    /// Returns the dragon's phase machine. Mirrors vanilla `getPhaseManager`.
+    #[must_use]
+    pub const fn phase_manager(&self) -> &EnderDragonPhaseManager {
+        &self.phase_manager
+    }
+
+    /// Publishes the active phase to watching clients.
+    ///
+    /// A vanilla client runs its own copy of the phase machine off this value, so it
+    /// is what makes the dragon animate correctly rather than any server-side work.
+    pub(super) fn set_synced_phase(&self, phase: EnderDragonPhase) {
+        self.entity_data
+            .lock()
+            .ender_dragon_mut()
+            .phase
+            .set(phase.id());
+    }
+
+    /// Returns the phase id currently published to clients.
+    #[must_use]
+    pub fn synced_phase(&self) -> i32 {
+        *self.entity_data.lock().ender_dragon().phase.get()
+    }
+
+    /// How many end crystals are still feeding the dragon.
+    ///
+    /// `None` means there is no fight at all, which vanilla treats differently from a
+    /// fight with zero crystals left in one of its three call sites.
+    // TODO: Read this from `EnderDragonFight` once that exists.
+    #[expect(
+        clippy::unused_self,
+        reason = "reads the dragon's fight once EnderDragonFight lands"
+    )]
+    #[must_use]
+    pub const fn alive_crystals(&self) -> Option<i32> {
+        None
+    }
+
+    /// Runs vanilla `EnderDragon.aiStep`.
+    ///
+    /// A full replacement for the shared living step, as vanilla's is: the dragon
+    /// steers from its phase rather than from movement input, and it shoves entities
+    /// with its wings instead of the usual entity pushing.
+    fn dragon_ai_step(&self, world: &Arc<World>) -> Option<MoveResult> {
+        self.process_flapping_movement();
+
+        // Everything below is inside vanilla's `else`; a dying dragon is moved by
+        // `tick_death` instead.
+        if self.is_dead_or_dying() {
+            return None;
+        }
+
+        self.tick_flap_time();
+        self.set_yaw(wrap_degrees(self.yaw()));
+
+        if self.is_no_ai() {
+            *self.flap_time.lock() = NO_AI_FLAP_TIME;
+            return None;
+        }
+
+        {
+            let mut history = self.flight_history.lock();
+            history.record(self.position().y, self.yaw());
+        }
+
+        let phase = self.tick_phase(world);
+        let result = self.steer_towards_phase_target(phase);
+
+        self.apply_effects_from_blocks();
+        self.set_y_body_rot(self.yaw());
+        result
+    }
+
+    /// Returns the dragon's yaw.
+    fn yaw(&self) -> f32 {
+        self.rotation().0
+    }
+
+    /// Sets the dragon's yaw, leaving its pitch alone.
+    ///
+    /// Stands in for vanilla `setYRot`; Steel's setter takes both components, and the
+    /// dragon only ever steers in yaw.
+    fn set_yaw(&self, yaw: f32) {
+        self.set_rotation((yaw, self.rotation().1));
+    }
+
+    /// Advances the wing beat. Mirrors the `flapTime` bookkeeping in `aiStep`.
+    fn tick_flap_time(&self) {
+        *self.o_flap_time.lock() = *self.flap_time.lock();
+
+        let velocity = self.velocity();
+        let horizontal = velocity.x.hypot(velocity.z) as f32;
+        let flap_speed = (0.2 / (horizontal * 10.0 + 1.0)) * 2.0_f32.powf(velocity.y as f32);
+
+        let mut flap_time = self.flap_time.lock();
+        *flap_time += if self.phase_manager.current().is_sitting() {
+            SITTING_FLAP_RATE
+        } else if *self.in_wall.lock() {
+            flap_speed * 0.5
+        } else {
+            flap_speed
+        };
+    }
+
+    /// Ticks the active phase, re-ticking once if it switched.
+    ///
+    /// Vanilla chases exactly one switch, and the steering that follows uses the new
+    /// phase, so a phase that hands off gets to set its successor's fly target in the
+    /// same tick.
+    fn tick_phase(&self, world: &Arc<World>) -> EnderDragonPhase {
+        let before = self.phase_manager.current_phase();
+        self.phase_manager
+            .instance(before)
+            .do_server_tick(self, world);
+
+        let after = self.phase_manager.current_phase();
+        if after != before {
+            self.phase_manager
+                .instance(after)
+                .do_server_tick(self, world);
+        }
+        self.phase_manager.current_phase()
+    }
+
+    /// Flies the dragon toward the active phase's target.
+    ///
+    /// Ported expression by expression from vanilla. Three orderings matter and are
+    /// easy to "tidy" into something that still looks right: the squared distance is
+    /// taken from the pre-clamp height delta; the heading vector reads the vertical
+    /// velocity *after* the climb has been added; and the forward thrust is applied
+    /// along `-Z` rather than through a movement input.
+    fn steer_towards_phase_target(&self, phase: EnderDragonPhase) -> Option<MoveResult> {
+        let instance = self.phase_manager.instance(phase);
+        let target = instance.fly_target_location()?;
+
+        let position = self.position();
+        let dx = target.x - position.x;
+        let mut dy = target.y - position.y;
+        let dz = target.z - position.z;
+        let dist_to_target = dx * dx + dy * dy + dz * dz;
+
+        let max = f64::from(instance.fly_speed());
+        let horizontal_dist = (dx * dx + dz * dz).sqrt();
+        if horizontal_dist > 0.0 {
+            dy = (dy / horizontal_dist).clamp(-max, max);
+        }
+
+        self.set_velocity(self.velocity() + DVec3::new(0.0, dy * 0.01, 0.0));
+        self.set_yaw(wrap_degrees(self.yaw()));
+
+        let aim = (target - position).normalize_or_zero();
+        let yaw_radians = f64::from(self.yaw().to_radians());
+        let heading = DVec3::new(yaw_radians.sin(), self.velocity().y, -yaw_radians.cos())
+            .normalize_or_zero();
+        let alignment = (((heading.dot(aim) as f32) + 0.5) / 1.5).max(0.0);
+
+        if dx.abs() > STEERING_EPSILON || dz.abs() > STEERING_EPSILON {
+            let desired = wrap_degrees(180.0 - (dx.atan2(dz) as f32).to_degrees() - self.yaw())
+                .clamp(-MAX_TURN_DEGREES, MAX_TURN_DEGREES);
+            let mut y_rot_a = self.y_rot_a.lock();
+            *y_rot_a *= 0.8;
+            *y_rot_a += desired * instance.turn_speed(self);
+            let turn = *y_rot_a;
+            drop(y_rot_a);
+            self.set_yaw(self.yaw() + turn * 0.1);
+        }
+
+        let span = (2.0 / (dist_to_target + 1.0)) as f32;
+        self.move_relative(
+            FORWARD_THRUST * (alignment * span + (1.0 - span)),
+            DVec3::new(0.0, 0.0, -1.0),
+        );
+
+        let velocity = self.velocity();
+        let movement = if *self.in_wall.lock() {
+            velocity * IN_WALL_MOVE_SCALE
+        } else {
+            velocity
+        };
+        let result = self.move_entity(MoverType::SelfMovement, movement);
+
+        let moved = self.velocity();
+        let slide = 0.8 + 0.15 * (moved.normalize_or_zero().dot(heading) + 1.0) / 2.0;
+        self.set_velocity(moved * DVec3::new(slide, VERTICAL_DRAG, slide));
+        result
+    }
+
     /// Applies damage routed through one of the dragon's hitboxes.
     ///
     /// Mirrors vanilla `EnderDragon.hurt(ServerLevel, EnderDragonPart, DamageSource,
@@ -182,6 +415,9 @@ impl EnderDragonEntity {
     ///
     /// Everything but the head takes a quarter of the damage plus a flat point, which
     /// is what makes aiming for the head worthwhile.
+    ///
+    /// Note the dragon reports a hit as handled even when it ignores the damage, so
+    /// an arrow from a dispenser still lands and simply does nothing.
     pub fn hurt_part(
         &self,
         world: &World,
@@ -189,21 +425,62 @@ impl EnderDragonEntity {
         source: &DamageSource,
         damage: f32,
     ) -> bool {
-        // TODO: Return early while in the DYING phase, and route through
-        // `DragonPhaseInstance::on_hurt`, once the phase machine lands.
-        let mut damage = damage;
+        let phase = self.phase_manager.current();
+        if phase.phase() == EnderDragonPhase::Dying {
+            return false;
+        }
+
+        let mut damage = phase.on_hurt(source, damage);
         if part.id() != self.head().id() {
             damage = damage / 4.0 + damage.min(1.0);
         }
 
-        if damage < 0.01 {
+        if damage < MINIMUM_EFFECTIVE_DAMAGE {
             return false;
         }
 
-        // TODO: Accumulate `sitting_damage_received` and take off once a quarter of
-        // max health has landed, which needs the sitting phases.
+        if !Self::is_damageable_by(world, source) {
+            return true;
+        }
+
+        let health_before = self.get_health();
         self.really_hurt(world, source, damage);
+        if phase.is_sitting() {
+            self.accumulate_sitting_damage(health_before - self.get_health());
+        }
         true
+    }
+
+    /// Whether a damage source is allowed to hurt the dragon at all.
+    ///
+    /// Vanilla admits only players and the explosion-shaped damage types, which is
+    /// what stops the dragon being whittled down by fire, drowning or a stray mob.
+    fn is_damageable_by(world: &World, source: &DamageSource) -> bool {
+        if source.is(&vanilla_damage_type_tags::DamageTypeTag::ALWAYS_HURTS_ENDER_DRAGONS) {
+            return true;
+        }
+
+        source
+            .causing_entity_id
+            .and_then(|id| world.get_entity_by_id(id))
+            .is_some_and(|entity| entity.as_player().is_some())
+    }
+
+    /// Tracks damage taken while perched, and takes off once enough has landed.
+    ///
+    /// Mirrors the accumulator in vanilla's per-part `hurt`: a quarter of max health
+    /// is what dislodges a sitting dragon.
+    fn accumulate_sitting_damage(&self, taken: f32) {
+        let mut received = self.sitting_damage_received.lock();
+        *received += taken;
+        if *received <= SITTING_ALLOWED_DAMAGE_FRACTION * self.get_max_health() {
+            return;
+        }
+
+        *received = 0.0;
+        drop(received);
+        self.phase_manager
+            .set_phase(self, EnderDragonPhase::Takeoff);
     }
 
     /// Applies the damage the shared living path would have applied.
@@ -251,6 +528,16 @@ impl Entity for EnderDragonEntity {
         self.update_dirty_mob_effect_entity_data();
     }
 
+    /// Mirrors vanilla `EnderDragon.isFlapping`.
+    ///
+    /// Detects the point in the beat where the wings sweep down, which is what makes
+    /// the shared move path emit the flap game event.
+    fn is_flapping(&self) -> bool {
+        let flap = (*self.flap_time.lock() * TAU).cos();
+        let previous = (*self.o_flap_time.lock() * TAU).cos();
+        previous <= -0.3 && flap >= -0.3
+    }
+
     /// Mirrors vanilla `EnderDragon.isPickable`.
     ///
     /// The dragon body itself is not a target; its eight parts are.
@@ -267,7 +554,7 @@ impl Entity for EnderDragonEntity {
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
         self.save_mob(nbt);
-        // TODO: Persist `DragonPhase` once the phase machine lands.
+        nbt.insert(DRAGON_PHASE_KEY, self.phase_manager.current_phase().id());
         nbt.insert(DRAGON_DEATH_TIME_KEY, self.dragon_death_time());
         nbt.insert(
             SITTING_DAMAGE_RECEIVED_KEY,
@@ -277,7 +564,10 @@ impl Entity for EnderDragonEntity {
 
     fn load_additional(&self, nbt: BorrowedNbtCompoundView<'_, '_>) {
         self.load_mob(nbt);
-        // TODO: Restore `DragonPhase` once the phase machine lands.
+        if let Some(phase) = nbt.int(DRAGON_PHASE_KEY) {
+            self.phase_manager
+                .set_phase(self, EnderDragonPhase::by_id(phase));
+        }
         if let Some(death_time) = nbt.int(DRAGON_DEATH_TIME_KEY) {
             *self.dragon_death_time.lock() = death_time;
         }
@@ -316,6 +606,21 @@ impl LivingEntity for EnderDragonEntity {
             return false;
         };
         self.hurt_part(world, body, source, amount)
+    }
+
+    /// Mirrors vanilla `EnderDragon.aiStep`, which does not call `super`.
+    fn ai_step(&self) -> Option<MoveResult> {
+        let world = self.level()?;
+        self.dragon_ai_step(&world)
+    }
+
+    /// Flushes the line-of-sight cache the shared AI path would have cleared.
+    ///
+    /// The dragon replaces `ai_step` wholesale, so it never reaches
+    /// `mob_server_ai_step`, and without this every targeting check would answer from
+    /// a cache populated once and never invalidated.
+    fn server_ai_step(&self) {
+        self.tick_sensing();
     }
 
     /// Mirrors vanilla `EnderDragon.getSoundVolume`.

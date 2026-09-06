@@ -347,6 +347,17 @@ pub trait Mob: LivingEntity + Leashable {
         is_saddled
     }
 
+    /// Clears this tick's line-of-sight cache.
+    ///
+    /// Mirrors the `getSensing().tick()` call at the top of vanilla
+    /// `Mob.serverAiStep`. Mobs that take the shared AI path get this for free; one
+    /// that replaces `ai_step` outright, as the Ender Dragon does, has to call it or
+    /// [`Self::has_line_of_sight_cached`] answers from a cache that is never
+    /// invalidated.
+    fn tick_sensing(&self) {
+        self.mob_base().sensing().lock().tick();
+    }
+
     /// Returns vanilla `Mob.getSensing().hasLineOfSight(target)`.
     ///
     /// Lives on `Mob` rather than `PathfinderMob` because vanilla's callers, such as
@@ -1409,7 +1420,7 @@ pub trait Mob: LivingEntity + Leashable {
 
     fn mob_server_ai_step(&self) {
         self.increment_no_action_time();
-        self.mob_base().sensing().lock().tick();
+        self.tick_sensing();
         if self.tick_count() % 5 == 0 {
             self.update_control_flags();
         }

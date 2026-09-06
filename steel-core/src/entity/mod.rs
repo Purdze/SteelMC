@@ -503,10 +503,7 @@ impl EntityIdBlock {
         self.count == 0
     }
 
-    /// Returns the ID of the `index`-th sub-entity, i.e. `first() + index + 1`.
-    ///
-    /// This is the client-side contract: a multipart mob's parts always follow
-    /// their parent's ID in order.
+    /// Returns the ID of the `index`-th sub-entity.
     ///
     /// # Panics
     ///
@@ -519,8 +516,19 @@ impl EntityIdBlock {
             index + 1 < self.count,
             "part index outside the reserved block"
         );
-        self.first.wrapping_add(index.wrapping_add(1) as i32)
+        part_entity_id(self.first, index)
     }
+}
+
+/// Returns the network ID a multipart mob's `index`-th sub-entity must take.
+///
+/// The client synthesizes a multipart mob's parts at `parent_id + 1 ..= parent_id + n`
+/// rather than receiving spawn packets for them, so this offset is a wire contract
+/// and lives in exactly one place. Prefer [`EntityIdBlock::part`], which also checks
+/// the index against what was actually reserved.
+#[must_use]
+pub const fn part_entity_id(parent_id: i32, index: u32) -> i32 {
+    parent_id.wrapping_add(index.wrapping_add(1) as i32)
 }
 
 /// Reserves `count` consecutive entity IDs under a single lock acquisition.

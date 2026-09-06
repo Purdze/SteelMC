@@ -7,6 +7,10 @@ use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
 
 const PART_COUNT: u32 = 2;
 
+/// Deliberately unlike the stub's entity type dimensions, so the tests would catch a
+/// part falling back to its parent's hitbox.
+const PART_SIZE: EntityDimensions = EntityDimensions::with_default_eye_height(1.0, 1.0);
+
 /// A stand-in for a multipart mob, so the world plumbing can be tested without
 /// depending on any concrete boss.
 struct MultipartTestEntity {
@@ -20,16 +24,8 @@ impl MultipartTestEntity {
         let parts = (0..PART_COUNT)
             .map(|index| {
                 let part: Arc<dyn PartEntity> = Arc::new(MultipartTestPart {
-                    base: EntityBase::new(
-                        ids.part(index),
-                        position,
-                        vanilla_entities::ITEM.dimensions,
-                        world.clone(),
-                    ),
-                    part_base: PartEntityBase::new(
-                        "test_part",
-                        EntityDimensions::with_default_eye_height(1.0, 1.0),
-                    ),
+                    base: EntityBase::new(ids.part(index), position, PART_SIZE, world.clone()),
+                    part_base: PartEntityBase::new("test_part", PART_SIZE),
                 });
                 part
             })
@@ -77,6 +73,10 @@ impl Entity for MultipartTestPart {
 
     fn entity_type(&self) -> EntityTypeRef {
         &vanilla_entities::ITEM
+    }
+
+    fn dimensions_for_pose(&self, _pose: EntityPose) -> EntityDimensions {
+        self.part_base.size()
     }
 
     fn is_same_entity(&self, other: &dyn Entity) -> bool {
@@ -288,4 +288,22 @@ fn reading_past_the_reserved_block_is_rejected() {
     // Silently returning the next entity's ID would corrupt both the parts map and
     // the client's `parent + 1 + i` synthesis.
     let _ = reserve_entity_ids(PART_COUNT + 1).part(PART_COUNT);
+}
+
+#[test]
+fn a_part_keeps_its_own_hitbox_across_a_dimension_refresh() {
+    init_vanilla_registry();
+    let world = fresh_test_world("multipart_part_hitbox");
+    let entity = spawn_multipart(&world);
+    let part = &entity.parts()[0];
+
+    // A part reports its parent's entity type, so without the `dimensions_for_pose`
+    // override this would snap to the parent's much larger box.
+    part.refresh_dimensions();
+
+    let box_ = part.bounding_box();
+    let width = box_.max_x() - box_.min_x();
+    let height = box_.max_y() - box_.min_y();
+    assert!((width - f64::from(PART_SIZE.width)).abs() < 1.0e-9);
+    assert!((height - f64::from(PART_SIZE.height)).abs() < 1.0e-9);
 }

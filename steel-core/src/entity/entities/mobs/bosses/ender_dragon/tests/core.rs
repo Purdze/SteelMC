@@ -372,3 +372,19 @@ fn the_holding_pattern_starts_steering_on_its_first_tick() {
     assert!((target.x.hypot(target.z) - 40.0).abs() < 2.0);
     assert!((73.0..=93.0).contains(&target.y));
 }
+
+#[test]
+fn a_perched_dragon_shrugs_off_knockback() {
+    let dragon = test_dragon();
+
+    // Hovering counts as sitting, and vanilla's override drops the knockback entirely
+    // rather than scaling it, so a perched dragon cannot be shoved off the podium.
+    dragon.knockback(1.0, 1.0, 0.0);
+    assert_eq!(dragon.velocity(), DVec3::ZERO);
+
+    dragon
+        .phase_manager()
+        .set_phase(&dragon, EnderDragonPhase::HoldingPattern);
+    dragon.knockback(1.0, 1.0, 0.0);
+    assert_ne!(dragon.velocity(), DVec3::ZERO);
+}

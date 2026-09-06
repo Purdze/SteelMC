@@ -40,8 +40,10 @@ use steel_registry::item_stack::ItemStack;
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_block_tags::BlockTag;
 use steel_registry::vanilla_entity_data::EnderDragonEntityData;
-use steel_registry::vanilla_game_rules::MOB_GRIEFING;
-use steel_registry::{level_events, sound_events, vanilla_damage_type_tags, vanilla_damage_types};
+use steel_registry::vanilla_game_rules::{MOB_DROPS, MOB_GRIEFING};
+use steel_registry::{
+    level_events, sound_events, vanilla_damage_type_tags, vanilla_damage_types, vanilla_game_events,
+};
 use steel_utils::geometry::WorldAabb;
 use steel_utils::locks::SyncMutex;
 use steel_utils::{BlockPos, Downcast as _, DowncastType, DowncastTypeKey, wrap_degrees};
@@ -50,11 +52,11 @@ use crate::enchantment_helper::{self, EnchantmentPostAttackContext};
 use crate::entity::ai::node::Node;
 use crate::entity::ai::path::Path;
 use crate::entity::damage::DamageSource;
-use crate::entity::entities::EndCrystalEntity;
+use crate::entity::entities::{EndCrystalEntity, ExperienceOrbEntity};
 use crate::entity::{
     Entity, EntityBase, EntityBaseLoad, EntityEventSource as _, EntityPose, EntitySyncedData,
-    LivingEntity, LivingEntityBase, Mob, MobBase, MobEffectInstance, PartEntity, SharedEntity,
-    entity_selector, part_entity_id, sync_dirty_mob_effects,
+    LivingEntity, LivingEntityBase, Mob, MobBase, MobEffectInstance, PartEntity, RemovalReason,
+    SharedEntity, entity_selector, part_entity_id, sync_dirty_mob_effects,
 };
 use crate::physics::{MoveResult, MoverType};
 use crate::world::World;
@@ -105,6 +107,27 @@ const KNOCKBACK_LIFT: f64 = 0.2;
 /// A target hit within this many ticks is only shoved, not bitten again.
 const REPEAT_ATTACK_GRACE_TICKS: i32 = 2;
 
+/// Ticks the death animation runs before the dragon is removed.
+const DRAGON_DEATH_DURATION: i32 = 200;
+/// Experience trickles out once the death animation passes this tick.
+const DEATH_XP_TRICKLE_START: i32 = 150;
+/// ...and lands every this many ticks after that.
+const DEATH_XP_TRICKLE_INTERVAL: i32 = 5;
+/// Share of the prize each trickle awards.
+const DEATH_XP_TRICKLE_SHARE: f32 = 0.08;
+/// Share of the prize paid out when the animation ends.
+const DEATH_XP_FINAL_SHARE: f32 = 0.2;
+/// Experience a dragon is worth.
+///
+/// Vanilla awards 12000 instead on a fight's first kill.
+// TODO: Read the fight's `hasPreviouslyKilledDragon` once `EnderDragonFight` exists.
+const DEATH_EXPERIENCE: i32 = 500;
+/// How far the dying dragon drifts upward each tick.
+///
+/// Declared `f32` because vanilla widens a float literal here, giving
+/// `0.100000001...` rather than the `f64` `0.1`.
+const DEATH_DRIFT_PER_TICK: f32 = 0.1;
+
 /// How far the dragon looks for a crystal to heal from.
 const CRYSTAL_SEARCH_RADIUS: f64 = 32.0;
 /// The crystal heals the dragon on ticks divisible by this.
@@ -130,12 +153,17 @@ pub const fn end_podium_location(origin: BlockPos) -> BlockPos {
     origin
 }
 
+/// Vanilla `Mth.floor(total * share)`, where the multiplication happens in `f32`.
+fn share_of(total: i32, share: f32) -> i32 {
+    (total as f32 * share).floor() as i32
+}
+
 /// Wraps an angle the way vanilla `EnderDragon.rotWrap` does.
 ///
 /// Vanilla's is `(float)Mth.wrapDegrees(double)`, so it wraps in `f64` and narrows
 /// afterwards. Steel's [`wrap_degrees`] is `f32`-only, which moves the narrowing one
 /// step earlier. Unlike the trig tables that decide the flight graph's `floor`, this
-/// cannot change an observable — the inputs are yaw differences, and both widths wrap
+/// cannot change an observable: the inputs are yaw differences, and both widths wrap
 /// them to the same value.
 fn rot_wrap(degrees: f64) -> f32 {
     wrap_degrees(degrees as f32)
@@ -583,7 +611,7 @@ impl EnderDragonEntity {
     /// A perched dragon lowers its head to a fixed offset; a flying one lets the head
     /// lag behind the body's recent climb.
     fn head_y_offset(&self, sample_5: DragonFlightSample) -> f32 {
-        if self.phase_manager.current().is_sitting() {
+        if self.is_sitting() {
             return -1.0;
         }
         (sample_5.y - self.flight_history.lock().get(0).y) as f32
@@ -624,7 +652,7 @@ impl EnderDragonEntity {
         let body = self.part_box(BODY);
         let center_x = f64::midpoint(body.min_x(), body.max_x());
         let center_z = f64::midpoint(body.min_z(), body.max_z());
-        let sitting = self.phase_manager.current().is_sitting();
+        let sitting = self.is_sitting();
 
         for entity in entities {
             let Some(living) = entity.as_living_entity() else {
@@ -683,6 +711,17 @@ impl EnderDragonEntity {
             &ItemStack::empty(),
             &context,
         );
+    }
+
+    /// Drops a share of the death prize, if the world allows mob drops at all.
+    ///
+    /// Vanilla spells the gamerule check out at both award sites; the two are the same
+    /// test over the same tick, so it lives here instead.
+    fn award_death_experience(&self, world: &Arc<World>, share: f32) {
+        if !world.get_game_rule(&MOB_DROPS) {
+            return;
+        }
+        ExperienceOrbEntity::award(world, self.position(), share_of(DEATH_EXPERIENCE, share));
     }
 
     /// Builds vanilla's `damageSources().mobAttack(this)`.
@@ -749,6 +788,14 @@ impl EnderDragonEntity {
         hit_wall
     }
 
+    /// Whether the dragon is perched.
+    ///
+    /// Vanilla spells out `phaseManager.getCurrentPhase().isSitting()` at each of its
+    /// five use sites; Rust can name it once.
+    fn is_sitting(&self) -> bool {
+        self.phase_manager.current().is_sitting()
+    }
+
     /// Returns the dragon's yaw.
     fn yaw(&self) -> f32 {
         self.rotation().0
@@ -771,7 +818,7 @@ impl EnderDragonEntity {
         let flap_speed = (0.2 / (horizontal * 10.0 + 1.0)) * 2.0_f32.powf(velocity.y as f32);
 
         let mut flap_time = self.flap_time.lock();
-        *flap_time += if self.phase_manager.current().is_sitting() {
+        *flap_time += if self.is_sitting() {
             SITTING_FLAP_RATE
         } else if *self.in_wall.lock() {
             flap_speed * 0.5
@@ -977,6 +1024,18 @@ impl Entity for EnderDragonEntity {
         &self.sub_entities
     }
 
+    /// Mirrors vanilla `EnderDragon.kill`, which removes the dragon outright.
+    ///
+    /// The shared `kill` damages a living entity instead, and the dragon turns damage
+    /// into the 200-tick death flight, so without this override `/kill` would take ten
+    /// seconds to take effect.
+    fn kill(&self, _world: &World) {
+        // TODO: Report to `EnderDragonFight::update_dragon` and `set_dragon_killed`
+        // once the fight exists.
+        self.set_removed(RemovalReason::Killed);
+        self.game_event(&vanilla_game_events::ENTITY_DIE);
+    }
+
     /// Mirrors vanilla `EnderDragon.sanitizeScale`, which pins the dragon to 1.0.
     fn dimensions_for_pose(&self, _pose: EntityPose) -> EntityDimensions {
         self.entity_type.dimensions
@@ -1068,6 +1127,80 @@ impl LivingEntity for EnderDragonEntity {
             return false;
         };
         self.hurt_part(world, body, source, amount)
+    }
+
+    /// Mirrors vanilla `EnderDragon.knockback`, which a perched dragon shrugs off.
+    ///
+    /// Vanilla's override also takes the damage source and amount; Steel's signature
+    /// carries neither, and the dragon's body uses neither.
+    fn knockback(&self, power: f64, xd: f64, zd: f64) {
+        if self.is_sitting() {
+            return;
+        }
+        self.default_knockback(power, xd, zd);
+    }
+
+    /// Mirrors vanilla `EnderDragon.handleKillingBlow`.
+    ///
+    /// Rather than dying, an airborne dragon claws back to a single point of health and
+    /// enters its death flight. Because [`LivingEntity::is_dead_or_dying`] is
+    /// health-based, restoring that point is exactly what keeps [`Self::tick_death`]
+    /// from starting and lets the phase machine keep steering.
+    ///
+    /// The default is deliberately not called. Vanilla's body is `dead = true`, which
+    /// Steel's `die` has already claimed atomically before this hook runs.
+    fn handle_killing_blow(&self) {
+        if self.is_sitting() {
+            return;
+        }
+
+        self.set_health(1.0);
+        self.phase_manager.set_phase(self, EnderDragonPhase::Dying);
+    }
+
+    /// Mirrors vanilla `EnderDragon.tickDeath`.
+    ///
+    /// A full replacement for the shared death tick, which counts a different field to
+    /// a different limit. Vanilla's explosion particles between ticks 180 and 200 go
+    /// through `Level.addParticle`, a no-op on the server, so they are absent here.
+    fn tick_death(&self) {
+        // TODO: Report to `EnderDragonFight::update_dragon` once the fight exists.
+        let death_time = {
+            let mut death_time = self.dragon_death_time.lock();
+            *death_time += 1;
+            *death_time
+        };
+
+        let Some(world) = self.level() else {
+            return;
+        };
+
+        if death_time > DEATH_XP_TRICKLE_START && death_time % DEATH_XP_TRICKLE_INTERVAL == 0 {
+            self.award_death_experience(&world, DEATH_XP_TRICKLE_SHARE);
+        }
+
+        if death_time == 1 && !self.is_silent() {
+            world.global_level_event(level_events::SOUND_DRAGON_DEATH, self.block_position(), 0);
+        }
+
+        let drift = DVec3::new(0.0, f64::from(DEATH_DRIFT_PER_TICK), 0.0);
+        let _ = self.move_entity(MoverType::SelfMovement, drift);
+        for part in &self.sub_entities {
+            // The old position is recorded *before* the move here, the opposite way
+            // round from `tick_parts`, which snapshots first and writes back after.
+            part.set_old_position_to_current();
+            part.set_part_position(part.position() + drift);
+        }
+
+        if death_time < DRAGON_DEATH_DURATION {
+            return;
+        }
+
+        self.award_death_experience(&world, DEATH_XP_FINAL_SHARE);
+
+        // TODO: Report to `EnderDragonFight::set_dragon_killed` once the fight exists.
+        self.set_removed(RemovalReason::Killed);
+        self.game_event(&vanilla_game_events::ENTITY_DIE);
     }
 
     /// Mirrors vanilla `EnderDragon.aiStep`, which does not call `super`.

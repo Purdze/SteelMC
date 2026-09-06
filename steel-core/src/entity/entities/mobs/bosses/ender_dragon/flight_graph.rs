@@ -32,8 +32,8 @@ const MINIMUM_NODE_Y: i32 = 73;
 /// Vanilla's initial `closestDist`, in squared blocks.
 const MAX_NODE_DISTANCE: f32 = 10_000.0;
 
-/// Vanilla writes these as `(float)(Math.PI / n)` — an `f64` division rounded to
-/// `f32` — and the angle arithmetic that follows is `float` throughout.
+/// Vanilla writes these as `(float)(Math.PI / n)`, an `f64` division rounded to
+/// `f32`, and the angle arithmetic that follows is `float` throughout.
 const FRAC_PI_12: f32 = (PI_F64 / 12.0) as f32;
 const FRAC_PI_8: f32 = (PI_F64 / 8.0) as f32;
 const FRAC_PI_4: f32 = (PI_F64 / 4.0) as f32;
@@ -107,8 +107,8 @@ impl SearchState {
 ///
 /// Every comparison is a strict `<`, which is what makes ties deterministic: an
 /// equal-cost newcomer never displaces a seated node, and [`Self::down_heap`] prefers
-/// the **right** child when the two children tie. Ties are common — the three rings
-/// are symmetric — and a different pop order yields an equally short but visibly
+/// the **right** child when the two children tie. Ties are common, because the three rings
+/// are symmetric, and a different pop order yields an equally short but visibly
 /// different flight path.
 struct NodeHeap {
     heap: [u8; NODE_COUNT],

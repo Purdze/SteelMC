@@ -8,10 +8,12 @@
 //! driven by the synced phase id, which makes keeping that id correct the important
 //! client-facing invariant rather than any server-side animation work.
 
+mod death;
 mod holding_pattern;
 mod hover;
 mod navigation;
 
+pub use death::DragonDeathPhase;
 pub use holding_pattern::DragonHoldingPatternPhase;
 pub use hover::DragonHoverPhase;
 
@@ -163,7 +165,7 @@ pub struct EnderDragonPhaseManager {
     sitting_scanning: PlaceholderPhase,
     sitting_attacking: PlaceholderPhase,
     charging_player: PlaceholderPhase,
-    dying: PlaceholderPhase,
+    dying: DragonDeathPhase,
     hovering: DragonHoverPhase,
     /// The active phase.
     ///
@@ -191,7 +193,7 @@ impl EnderDragonPhaseManager {
             sitting_scanning: PlaceholderPhase::new(EnderDragonPhase::SittingScanning),
             sitting_attacking: PlaceholderPhase::new(EnderDragonPhase::SittingAttacking),
             charging_player: PlaceholderPhase::new(EnderDragonPhase::ChargingPlayer),
-            dying: PlaceholderPhase::new(EnderDragonPhase::Dying),
+            dying: DragonDeathPhase::new(),
             hovering: DragonHoverPhase::new(),
             current: AtomicI32::new(EnderDragonPhase::Hovering.id()),
         }

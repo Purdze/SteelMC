@@ -22,7 +22,7 @@ use crate::world::World;
 /// A dragon at the origin facing yaw 0, with a zeroed flight history.
 ///
 /// The history starts zeroed, so every sample the geometry reads is `(0, 0)` without
-/// any setup — which is what makes the offsets below exact rather than approximate.
+/// any setup, which is what makes the offsets below exact rather than approximate.
 fn origin_dragon() -> EnderDragonEntity {
     init_vanilla_registry();
     let ids = reserve_entity_ids(9);
@@ -170,7 +170,7 @@ fn dragon_transparent_blocks_are_passed_straight_through() {
 
     let hit_wall = scan(&world);
 
-    // A `dragon_transparent` block is neither broken nor treated as a wall — the scan
+    // A `dragon_transparent` block is neither broken nor treated as a wall; the scan
     // skips it outright.
     assert!(scanned_block_survived(&world), "the light block was broken");
     assert!(!hit_wall);
@@ -260,7 +260,7 @@ fn the_head_bites_for_double_a_wing() {
     let world = walls_test_world("dragon_head_bite");
     let dragon = add_flying_dragon(&world);
     // The head settles at (0, 0, -6.5) once positioned. The bite sweep runs *before*
-    // the head is repositioned, so it only reaches this pig on the second tick — which
+    // the head is repositioned, so it only reaches this pig on the second tick, which
     // is exactly the one-tick lag vanilla has.
     let pig = add_target(&world, DVec3::new(0.0, 0.0, -7.0));
     let health_before = health(&pig);

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use glam::DVec3;
 use steel_utils::locks::SyncMutex;
 
-use super::navigation::navigate_to_next_path_node;
+use super::navigation::{
+    MAX_TARGET_DISTANCE_SQR, MIN_TARGET_DISTANCE_SQR, navigate_to_next_path_node,
+};
 use super::{DragonPhaseInstance, EnderDragonPhase};
 use crate::chunk::heightmap::HeightmapType;
 use crate::entity::Entity as _;
@@ -14,10 +16,6 @@ use crate::entity::entities::mobs::bosses::ender_dragon::{
 };
 use crate::world::World;
 
-/// Re-target once the current target is nearer than this, squared.
-const MIN_TARGET_DISTANCE_SQR: f64 = 100.0;
-/// Re-target once the current target is further than this, squared.
-const MAX_TARGET_DISTANCE_SQR: f64 = 22_500.0;
 /// `World::nearest_player` treats a negative limit as unlimited, which is what
 /// vanilla's unset `TargetingConditions` range amounts to.
 const UNLIMITED_RANGE: f64 = -1.0;
@@ -159,7 +157,7 @@ impl DragonHoldingPatternPhase {
 
         target_node = match dragon.alive_crystals() {
             // Vanilla's test is `aliveCrystals() >= 0`, which is always true, so the
-            // crystal count never matters here — only whether a fight exists at all.
+            // crystal count never matters here, only whether a fight exists at all.
             Some(alive) if alive >= 0 => target_node.rem_euclid(OUTER_RING_NODES),
             // Confines a fightless dragon to the eight middle-ring nodes. The mask runs
             // on a possibly negative operand, which is deliberate: Rust's `&` gives the
@@ -194,7 +192,7 @@ impl DragonPhaseInstance for DragonHoldingPatternPhase {
 
         // A missing target reads as distance zero, which is what makes `begin` force a
         // pick on the very next tick. The two collision flags are permanently false
-        // under `no_physics` — in vanilla as well — so they are carried for shape
+        // under `no_physics` (in vanilla as well), so they are carried for shape
         // rather than effect.
         if distance < MIN_TARGET_DISTANCE_SQR
             || distance > MAX_TARGET_DISTANCE_SQR

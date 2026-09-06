@@ -9,6 +9,13 @@ use glam::DVec3;
 
 use crate::entity::ai::path::Path;
 
+/// Bounds on the squared distance to a fly target that count as still being on course.
+///
+/// The holding pattern re-targets once it leaves them; the death phase treats leaving
+/// them as having arrived at the podium.
+pub const MIN_TARGET_DISTANCE_SQR: f64 = 100.0;
+pub const MAX_TARGET_DISTANCE_SQR: f64 = 22_500.0;
+
 /// How far above a node the dragon may aim.
 const NODE_HEIGHT_SPREAD: f32 = 20.0;
 

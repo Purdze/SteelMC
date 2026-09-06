@@ -13,12 +13,14 @@
 //! its own copy of the phase machine off the synced phase id, so keeping that id
 //! correct is what makes the visuals right.
 
+mod flight_graph;
 mod flight_history;
 mod part;
 mod phases;
 #[cfg(test)]
 mod tests;
 
+pub use flight_graph::DragonFlightGraph;
 pub use flight_history::{DragonFlightHistory, DragonFlightSample};
 pub use part::EnderDragonPart;
 pub use phases::{DragonPhaseInstance, EnderDragonPhase, EnderDragonPhaseManager};
@@ -36,8 +38,10 @@ use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_entity_data::EnderDragonEntityData;
 use steel_registry::{sound_events, vanilla_damage_type_tags};
 use steel_utils::locks::SyncMutex;
-use steel_utils::{Downcast as _, DowncastType, DowncastTypeKey, wrap_degrees};
+use steel_utils::{BlockPos, Downcast as _, DowncastType, DowncastTypeKey, wrap_degrees};
 
+use crate::entity::ai::node::Node;
+use crate::entity::ai::path::Path;
 use crate::entity::damage::DamageSource;
 use crate::entity::{
     Entity, EntityBase, EntityBaseLoad, EntityPose, EntitySyncedData, LivingEntity,
@@ -78,6 +82,18 @@ const DRAGON_PHASE_KEY: &str = "DragonPhase";
 const DRAGON_DEATH_TIME_KEY: &str = "DragonDeathTime";
 const SITTING_DAMAGE_RECEIVED_KEY: &str = "sitting_damage_received";
 
+/// Where the exit portal sits for an arena centered on `origin`.
+///
+/// Mirrors vanilla `EndPodiumFeature.getLocation`. That method offsets a constant
+/// `END_PODIUM_LOCATION`, which is `BlockPos.ZERO`, so this is an identity today; it
+/// exists so the call sites read like vanilla and so the constant has one home when
+/// the podium feature itself lands.
+// TODO: Move this onto `EndPodiumFeature` once runtime feature placement exists.
+#[must_use]
+pub const fn end_podium_location(origin: BlockPos) -> BlockPos {
+    origin
+}
+
 /// The Ender Dragon.
 #[entity_behavior(class = "EnderDragon", parts = 8)]
 pub struct EnderDragonEntity {
@@ -106,6 +122,14 @@ pub struct EnderDragonEntity {
     y_rot_a: SyncMutex<f32>,
     /// Vanilla `inWall`, set by the wall scan once that lands.
     in_wall: SyncMutex<bool>,
+    /// Vanilla `fightOrigin`, the arena center this dragon belongs to.
+    ///
+    /// Set by the fight rather than persisted: vanilla saves only the phase, the
+    /// death timer and the sitting damage.
+    fight_origin: SyncMutex<BlockPos>,
+    /// Vanilla `nodes` and `nodeAdjacency`, built on first use because the layout
+    /// samples the terrain.
+    flight_graph: SyncMutex<Option<DragonFlightGraph>>,
 }
 
 // SAFETY: The owner-scoped type key uniquely identifies EnderDragonEntity.
@@ -165,6 +189,8 @@ impl EnderDragonEntity {
             o_flap_time: SyncMutex::new(0.0),
             y_rot_a: SyncMutex::new(0.0),
             in_wall: SyncMutex::new(false),
+            fight_origin: SyncMutex::new(BlockPos::ZERO),
+            flight_graph: SyncMutex::new(None),
         }
     }
 
@@ -257,6 +283,54 @@ impl EnderDragonEntity {
     #[must_use]
     pub const fn alive_crystals(&self) -> Option<i32> {
         None
+    }
+
+    /// the arena center this dragon belongs to. Vanilla `getFightOrigin`.
+    #[must_use]
+    pub fn fight_origin(&self) -> BlockPos {
+        *self.fight_origin.lock()
+    }
+
+    /// Sets the arena center. Vanilla `setFightOrigin`.
+    pub fn set_fight_origin(&self, origin: BlockPos) {
+        *self.fight_origin.lock() = origin;
+    }
+
+    /// Returns the flight-graph node nearest the dragon.
+    ///
+    /// Mirrors vanilla `findClosestNode()`, whose no-argument overload also builds the
+    /// graph on first use. The build samples the terrain, so it needs the world.
+    pub fn find_closest_node(&self, world: &World) -> usize {
+        let position = self.position();
+        let crystals = self.alive_crystals();
+        self.with_flight_graph(world, |graph| graph.closest_node(position, crystals))
+    }
+
+    /// Paths between two flight-graph nodes. Mirrors vanilla `findPath`.
+    pub fn find_path(
+        &self,
+        world: &World,
+        start: usize,
+        end: usize,
+        final_node: Option<Node>,
+    ) -> Option<Path> {
+        let crystals = self.alive_crystals();
+        self.with_flight_graph(world, |graph| {
+            graph.find_path(start, end, final_node, crystals)
+        })
+    }
+
+    /// Runs `action` against the flight graph, building it if this is the first use.
+    ///
+    /// `action` runs under the graph lock, so it must stay confined to the graph. The
+    /// two callers above satisfy that: a search reads node positions and nothing else.
+    fn with_flight_graph<R>(
+        &self,
+        world: &World,
+        action: impl FnOnce(&DragonFlightGraph) -> R,
+    ) -> R {
+        let mut graph = self.flight_graph.lock();
+        action(graph.get_or_insert_with(|| DragonFlightGraph::build(world)))
     }
 
     /// Runs vanilla `EnderDragon.aiStep`.

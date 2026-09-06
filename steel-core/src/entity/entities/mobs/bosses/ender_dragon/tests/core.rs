@@ -350,3 +350,25 @@ fn the_phase_round_trips_through_nbt() {
         EnderDragonPhase::HoldingPattern
     );
 }
+
+#[test]
+fn the_holding_pattern_starts_steering_on_its_first_tick() {
+    let dragon = test_dragon();
+    let manager = dragon.phase_manager();
+    manager.set_phase(&dragon, EnderDragonPhase::HoldingPattern);
+
+    // `begin` clears the path, and the roll to leave the circle only happens once a
+    // path has been walked to its end, so the first tick always walks the graph.
+    manager.current().do_server_tick(&dragon, test_world());
+
+    assert_eq!(manager.current_phase(), EnderDragonPhase::HoldingPattern);
+    let target = manager
+        .current()
+        .fly_target_location()
+        .expect("the first tick always picks a target");
+
+    // With no fight the dragon is confined to the radius-40 middle ring, and the
+    // target sits up to 20 blocks above the node it aims at.
+    assert!((target.x.hypot(target.z) - 40.0).abs() < 2.0);
+    assert!((73.0..=93.0).contains(&target.y));
+}

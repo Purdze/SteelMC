@@ -8,8 +8,11 @@
 //! driven by the synced phase id, which makes keeping that id correct the important
 //! client-facing invariant rather than any server-side animation work.
 
+mod holding_pattern;
 mod hover;
+mod navigation;
 
+pub use holding_pattern::DragonHoldingPatternPhase;
 pub use hover::DragonHoverPhase;
 
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -151,7 +154,7 @@ pub trait DragonPhaseInstance: Send + Sync {
 ///
 /// Mirrors vanilla `EnderDragonPhaseManager`.
 pub struct EnderDragonPhaseManager {
-    holding_pattern: PlaceholderPhase,
+    holding_pattern: DragonHoldingPatternPhase,
     strafe_player: PlaceholderPhase,
     landing_approach: PlaceholderPhase,
     landing: PlaceholderPhase,
@@ -179,7 +182,7 @@ impl EnderDragonPhaseManager {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            holding_pattern: PlaceholderPhase::new(EnderDragonPhase::HoldingPattern),
+            holding_pattern: DragonHoldingPatternPhase::new(),
             strafe_player: PlaceholderPhase::new(EnderDragonPhase::StrafePlayer),
             landing_approach: PlaceholderPhase::new(EnderDragonPhase::LandingApproach),
             landing: PlaceholderPhase::new(EnderDragonPhase::Landing),

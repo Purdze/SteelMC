@@ -33,7 +33,7 @@ use glam::DVec3;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::NbtCompound;
 use steel_macros::entity_behavior;
-use steel_math::trig;
+use steel_math::{trig, wrap_degrees};
 use steel_protocol::packets::game::SoundSource;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::entity_type::{EntityDimensions, EntityTypeRef};
@@ -47,7 +47,7 @@ use steel_registry::{
 };
 use steel_utils::geometry::WorldAabb;
 use steel_utils::locks::SyncMutex;
-use steel_utils::{BlockPos, Downcast as _, DowncastType, DowncastTypeKey, wrap_degrees};
+use steel_utils::{BlockPos, Downcast as _, DowncastType, DowncastTypeKey};
 
 use crate::enchantment_helper::{self, EnchantmentPostAttackContext};
 use crate::entity::ai::node::Node;

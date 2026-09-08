@@ -4,7 +4,6 @@
 //! `nodeAdjacency` table built inside `findClosestNode()`, plus
 //! `findClosestNode(double, double, double)`, `findPath` and `reconstructPath`.
 
-use std::array;
 use std::f32::consts::PI;
 use std::f64::consts::PI as PI_F64;
 
@@ -250,42 +249,67 @@ impl DragonFlightGraph {
     /// The rings are centered on the **world origin**, not on the dragon's fight
     /// origin. Every other position the dragon works with is fight-origin-relative, so
     /// this one is worth flagging rather than "fixing".
+    ///
+    /// Returns `None` when any of the 24 columns sits in a chunk that is not loaded to
+    /// full status. Vanilla's `getHeightmapPos` blocking-loads instead, which Steel has
+    /// no synchronous equivalent for, and [`World::level_height_at`]'s fallback would
+    /// hand back the world floor: in the End that clamps every ring to
+    /// [`MINIMUM_NODE_Y`], and the caller caches the graph for the dragon's whole life.
+    /// Refusing lets the caller retry on a later tick, the way the portal scan and
+    /// `execute ... over` already do rather than guessing.
+    // TODO: Hold a chunk ticket over the arena once `EnderDragonFight` exists, so the
+    // columns are guaranteed loaded and this can stop failing.
     #[must_use]
-    pub fn build(world: &World) -> Self {
-        Self {
-            nodes: array::from_fn(|index| {
-                let (radius, y_adjustment, angle) = if index < OUTER_RING_NODES {
-                    (60.0_f32, 5, ring_angle(FRAC_PI_12, index))
-                } else if index < INNER_RING_START {
-                    // Vanilla writes this as `yAdjustment += 10` over the shared 5.
-                    (
-                        40.0_f32,
-                        15,
-                        ring_angle(FRAC_PI_8, index - OUTER_RING_NODES),
-                    )
-                } else {
-                    (20.0_f32, 5, ring_angle(FRAC_PI_4, index - INNER_RING_START))
-                };
+    pub fn try_build(world: &World) -> Option<Self> {
+        let mut nodes = Vec::with_capacity(NODE_COUNT);
+        for index in 0..NODE_COUNT {
+            let (radius, y_adjustment, angle) = if index < OUTER_RING_NODES {
+                (60.0_f32, 5, ring_angle(FRAC_PI_12, index))
+            } else if index < INNER_RING_START {
+                // Vanilla writes this as `yAdjustment += 10` over the shared 5.
+                (
+                    40.0_f32,
+                    15,
+                    ring_angle(FRAC_PI_8, index - OUTER_RING_NODES),
+                )
+            } else {
+                (20.0_f32, 5, ring_angle(FRAC_PI_4, index - INNER_RING_START))
+            };
 
-                // `trig` is a port of `Mth.cos`/`Mth.sin`, a 65536-entry lookup table
-                // rather than `f32::cos`. That distinction decides `floor` outright at
-                // each ring's axis points, where the product lands on an integer.
-                let x = (radius * trig::cos(f64::from(angle))).floor() as i32;
-                let z = (radius * trig::sin(f64::from(angle))).floor() as i32;
-                let surface = world.heightmap_pos(
-                    HeightmapType::MotionBlockingNoLeaves,
-                    BlockPos::new(x, 0, z),
-                );
+            // `trig` is a port of `Mth.cos`/`Mth.sin`, a 65536-entry lookup table
+            // rather than `f32::cos`. That distinction decides `floor` outright at
+            // each ring's axis points, where the product lands on an integer.
+            let x = (radius * trig::cos(f64::from(angle))).floor() as i32;
+            let z = (radius * trig::sin(f64::from(angle))).floor() as i32;
+            // `height_at` rather than `heightmap_pos`, because only the former
+            // distinguishes "no terrain here" from "chunk not loaded". The ring stays
+            // within +/-60 blocks, so the horizontal bounds check `level_height_at`
+            // adds cannot trigger.
+            let surface = world.height_at(HeightmapType::MotionBlockingNoLeaves, x, z)?;
 
-                Node::new(x, MINIMUM_NODE_Y.max(surface.y() + y_adjustment), z)
-            }),
+            nodes.push(Node::new(x, MINIMUM_NODE_Y.max(surface + y_adjustment), z));
         }
+
+        Some(Self {
+            nodes: nodes.try_into().ok()?,
+        })
     }
 
     /// Returns a node's position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is not below [`NODE_COUNT`]. Use [`Self::get`] from anything
+    /// that did not get its index out of this graph.
     #[must_use]
     pub const fn node(&self, index: usize) -> &Node {
         &self.nodes[index]
+    }
+
+    /// Returns a node's position, or `None` if `index` is out of range.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&Node> {
+        self.nodes.get(index)
     }
 
     /// Returns the graph node nearest `position`.
@@ -322,7 +346,10 @@ impl DragonFlightGraph {
     ///
     /// `final_node` is appended to the result without being part of the graph, which
     /// is how the landing and strafing phases aim at a point of their own choosing.
-    /// Returns `None` only when the search made no progress at all.
+    ///
+    /// Returns `None` when the search made no progress at all, and also when either
+    /// endpoint is out of range: this is `pub`, so a third-party phase can hand it an
+    /// index the graph never produced, and refusing beats indexing past the rings.
     #[must_use]
     pub fn find_path(
         &self,
@@ -331,6 +358,10 @@ impl DragonFlightGraph {
         final_node: Option<Node>,
         crystals: Option<i32>,
     ) -> Option<Path> {
+        if start >= NODE_COUNT || end >= NODE_COUNT {
+            return None;
+        }
+
         let mut state = [SearchState::EMPTY; NODE_COUNT];
         let mut open_set = NodeHeap::new();
 

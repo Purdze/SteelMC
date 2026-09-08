@@ -25,6 +25,7 @@ pub use flight_history::{DragonFlightHistory, DragonFlightSample};
 pub use part::EnderDragonPart;
 pub use phases::{DragonPhaseInstance, EnderDragonPhase, EnderDragonPhaseManager};
 
+use std::array;
 use std::f32::consts::TAU;
 use std::sync::{Arc, Weak};
 
@@ -381,8 +382,9 @@ impl EnderDragonEntity {
     /// Returns the flight-graph node nearest the dragon.
     ///
     /// Mirrors vanilla `findClosestNode()`, whose no-argument overload also builds the
-    /// graph on first use. The build samples the terrain, so it needs the world.
-    pub fn find_closest_node(&self, world: &World) -> usize {
+    /// graph on first use. The build samples the terrain, so it needs the world, and it
+    /// yields `None` while the arena's chunks are still cold.
+    pub fn find_closest_node(&self, world: &World) -> Option<usize> {
         let position = self.position();
         let crystals = self.alive_crystals();
         self.with_flight_graph(world, |graph| graph.closest_node(position, crystals))
@@ -399,20 +401,34 @@ impl EnderDragonEntity {
         let crystals = self.alive_crystals();
         self.with_flight_graph(world, |graph| {
             graph.find_path(start, end, final_node, crystals)
-        })
+        })?
     }
 
     /// Runs `action` against the flight graph, building it if this is the first use.
     ///
     /// `action` runs under the graph lock, so it must stay confined to the graph. The
     /// two callers above satisfy that: a search reads node positions and nothing else.
+    ///
+    /// # Lock order
+    ///
+    /// A phase may hold its own state lock across a call here, so the order is
+    /// phase state -> flight graph -> chunk map, and nothing may take them the other
+    /// way round. The build's world reads sit at the deepest point of that chain, but
+    /// they never run under a phase lock in practice: `pick_new_path` warms the graph
+    /// through `find_closest_node` before it locks its own state.
     fn with_flight_graph<R>(
         &self,
         world: &World,
         action: impl FnOnce(&DragonFlightGraph) -> R,
-    ) -> R {
+    ) -> Option<R> {
         let mut graph = self.flight_graph.lock();
-        action(graph.get_or_insert_with(|| DragonFlightGraph::build(world)))
+        // Deliberately not `get_or_insert_with`: a build off cold chunks must not be
+        // cached, because nothing would ever rebuild it. Leaving the slot empty makes
+        // the next tick try again.
+        if graph.is_none() {
+            *graph = DragonFlightGraph::try_build(world);
+        }
+        graph.as_ref().map(action)
     }
 
     /// Runs vanilla `EnderDragon.aiStep`.
@@ -422,6 +438,11 @@ impl EnderDragonEntity {
     /// with its wings instead of the usual entity pushing.
     fn dragon_ai_step(&self, world: &Arc<World>) -> Option<MoveResult> {
         self.process_flapping_movement();
+
+        // Above the `isDeadOrDying` split, as vanilla does, so the beat keeps tracking
+        // while the dragon dies. Below it the two would freeze a stroke apart, and
+        // `process_flapping_movement` still reads them on every dying tick.
+        *self.o_flap_time.lock() = *self.flap_time.lock();
 
         // Everything below is inside vanilla's `else`; a dying dragon is moved by
         // `tick_death` instead.
@@ -494,6 +515,10 @@ impl EnderDragonEntity {
     /// damage sweep sits *between* positioning the body and positioning the head, so
     /// it reads the head box from the previous tick; and `knock_back` centers on the
     /// body box, which by then holds this tick's position.
+    #[expect(
+        clippy::similar_names,
+        reason = "the sample bindings are named for the vanilla latency indices they read"
+    )]
     fn tick_parts(&self, world: &Arc<World>) {
         let old_positions: Vec<DVec3> = self
             .sub_entities
@@ -501,10 +526,23 @@ impl EnderDragonEntity {
             .map(|part| part.position())
             .collect();
 
-        let (sample_5, sample_10) = {
+        // One pass over the history covers every sample this tick needs: the body's own
+        // two, the head's lag reference, and one per tail segment. Vanilla re-reads the
+        // ring per use, but nothing here writes to it, so the values are identical.
+        let (sample_0, sample_5, sample_10, tail_samples) = {
             let history = self.flight_history.lock();
-            (history.get(5), history.get(10))
+            (
+                history.get(0),
+                history.get(5),
+                history.get(10),
+                array::from_fn::<_, TAIL_COUNT, _>(|index| history.get(12 + index as i32 * 2)),
+            )
         };
+
+        // Vanilla reads this afresh inside every `tickPart`. Holding one value is only
+        // sound because nothing between the first and last call moves the dragon: the
+        // sweeps below push and hurt *other* entities and never reposition `self`.
+        let position = self.position();
 
         // Every expression below is `f32` up to the point vanilla widens it, because
         // the trig lookup indexes off the narrowed value. Doing the arithmetic in `f64`
@@ -518,14 +556,17 @@ impl EnderDragonEntity {
 
         self.tick_part(
             BODY,
+            position,
             DVec3::new(f64::from(ss1 * 0.5), 0.0, f64::from(-cc1 * 0.5)),
         );
         self.tick_part(
             WING1,
+            position,
             DVec3::new(f64::from(cc1 * 4.5), 2.0, f64::from(ss1 * 4.5)),
         );
         self.tick_part(
             WING2,
+            position,
             DVec3::new(f64::from(cc1 * -4.5), 2.0, f64::from(ss1 * -4.5)),
         );
 
@@ -537,10 +578,11 @@ impl EnderDragonEntity {
         let head_yaw = yaw_radians - *self.y_rot_a.lock() * 0.01;
         let ss2 = trig::sin(f64::from(head_yaw));
         let cc2 = trig::cos(f64::from(head_yaw));
-        let y_offset = self.head_y_offset(sample_5);
+        let y_offset = self.head_y_offset(sample_5, sample_0);
         for (index, reach) in [(HEAD, 6.5_f32), (NECK, 5.5)] {
             self.tick_part(
                 index,
+                position,
                 DVec3::new(
                     f64::from(ss2 * reach * cc_tilt),
                     f64::from(y_offset + ss_tilt * reach),
@@ -549,7 +591,15 @@ impl EnderDragonEntity {
             );
         }
 
-        self.tick_tail(sample_5, ss1, cc1, cc_tilt, ss_tilt);
+        self.tick_tail(
+            position,
+            sample_5,
+            &tail_samples,
+            ss1,
+            cc1,
+            cc_tilt,
+            ss_tilt,
+        );
 
         // Non-short-circuiting `|`: every box must be scanned for its block-breaking
         // side effect, not just until one reports a wall.
@@ -568,16 +618,23 @@ impl EnderDragonEntity {
     }
 
     /// Places the three tail segments, which trail the body through flight history.
+    ///
+    /// `trailing` holds one sample per segment, already read by [`Self::tick_parts`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "vanilla's inlined tail block, threaded rather than re-derived per segment"
+    )]
     fn tick_tail(
         &self,
+        position: DVec3,
         sample_5: DragonFlightSample,
+        trailing_samples: &[DragonFlightSample; TAIL_COUNT],
         ss1: f32,
         cc1: f32,
         cc_tilt: f32,
         ss_tilt: f32,
     ) {
-        for index in 0..TAIL_COUNT {
-            let trailing = self.flight_history.lock().get(12 + index as i32 * 2);
+        for (index, trailing) in trailing_samples.iter().enumerate() {
             // The yaw difference is taken in `f32` before it widens, as vanilla's is.
             let rotation = self.yaw().to_radians()
                 + rot_wrap(f64::from(trailing.y_rot - sample_5.y_rot)).to_radians();
@@ -587,6 +644,7 @@ impl EnderDragonEntity {
 
             self.tick_part(
                 TAIL_START + index,
+                position,
                 DVec3::new(
                     f64::from(-(ss1 * 1.5 + ss * distance) * cc_tilt),
                     trailing.y - sample_5.y - f64::from((distance + 1.5) * ss_tilt) + 1.5,
@@ -597,8 +655,10 @@ impl EnderDragonEntity {
     }
 
     /// Moves one hitbox to an offset from the dragon. Mirrors vanilla `tickPart`.
-    fn tick_part(&self, index: usize, offset: DVec3) {
-        self.sub_entities[index].set_part_position(self.position() + offset);
+    ///
+    /// `position` is the dragon's, read once per tick by [`Self::tick_parts`].
+    fn tick_part(&self, index: usize, position: DVec3, offset: DVec3) {
+        self.sub_entities[index].set_part_position(position + offset);
     }
 
     /// Returns a hitbox's current bounding box.
@@ -610,11 +670,11 @@ impl EnderDragonEntity {
     ///
     /// A perched dragon lowers its head to a fixed offset; a flying one lets the head
     /// lag behind the body's recent climb.
-    fn head_y_offset(&self, sample_5: DragonFlightSample) -> f32 {
+    fn head_y_offset(&self, sample_5: DragonFlightSample, sample_0: DragonFlightSample) -> f32 {
         if self.is_sitting() {
             return -1.0;
         }
-        (sample_5.y - self.flight_history.lock().get(0).y) as f32
+        (sample_5.y - sample_0.y) as f32
     }
 
     /// Mirrors vanilla's `level.getEntities(this, box, NO_CREATIVE_OR_SPECTATOR)`.
@@ -765,6 +825,12 @@ impl EnderDragonEntity {
                         destroyed |= world.remove_block(pos, false);
                     } else {
                         hit_wall = true;
+                        // Without griefing the particle event below is already dead and
+                        // the rest of the box can only set `hit_wall` again. Vanilla
+                        // scans on, but draws no RNG and changes no state doing it.
+                        if !griefing {
+                            return true;
+                        }
                     }
                 }
             }
@@ -809,10 +875,11 @@ impl EnderDragonEntity {
         self.set_rotation((yaw, self.rotation().1));
     }
 
-    /// Advances the wing beat. Mirrors the `flapTime` bookkeeping in `aiStep`.
+    /// Advances the wing beat. Mirrors the `flapTime` increment in `aiStep`.
+    ///
+    /// The previous beat is latched by [`Self::dragon_ai_step`] instead, because vanilla
+    /// does that above the dying split while this increment sits below it.
     fn tick_flap_time(&self) {
-        *self.o_flap_time.lock() = *self.flap_time.lock();
-
         let velocity = self.velocity();
         let horizontal = velocity.x.hypot(velocity.z) as f32;
         let flap_speed = (0.2 / (horizontal * 10.0 + 1.0)) * 2.0_f32.powf(velocity.y as f32);
@@ -1054,8 +1121,10 @@ impl Entity for EnderDragonEntity {
     /// Detects the point in the beat where the wings sweep down, which is what makes
     /// the shared move path emit the flap game event.
     fn is_flapping(&self) -> bool {
-        let flap = (*self.flap_time.lock() * TAU).cos();
-        let previous = (*self.o_flap_time.lock() * TAU).cos();
+        // The beat crosses the threshold shallowly, so `Mth.cos`'s table and `f32::cos`
+        // disagree on which tick the sweep lands.
+        let flap = trig::cos(f64::from(*self.flap_time.lock() * TAU));
+        let previous = trig::cos(f64::from(*self.o_flap_time.lock() * TAU));
         previous <= -0.3 && flap >= -0.3
     }
 

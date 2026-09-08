@@ -144,8 +144,15 @@ impl DragonHoldingPatternPhase {
     }
 
     /// Picks the next graph node to circle towards and paths to it.
+    ///
+    /// Does nothing while the flight graph cannot be built, which happens when the
+    /// arena's chunks are not loaded yet. The dragon keeps whatever path it already had
+    /// and this runs again next tick, rather than circling a graph pinned to the world
+    /// floor. Note this call also warms the graph before the state lock below is taken.
     fn pick_new_path(&self, dragon: &EnderDragonEntity, world: &Arc<World>) {
-        let current_node = dragon.find_closest_node(world);
+        let Some(current_node) = dragon.find_closest_node(world) else {
+            return;
+        };
 
         let mut state = self.state.lock();
         let mut target_node = current_node as i32;
@@ -214,5 +221,85 @@ impl DragonPhaseInstance for DragonHoldingPatternPhase {
 
     fn fly_target_location(&self) -> Option<DVec3> {
         self.state.lock().target_location
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Weak;
+
+    use super::*;
+    use crate::entity::entities::mobs::bosses::ender_dragon::tests::build_dragon;
+    use crate::test_support::test_world;
+
+    /// Enough rolls that a 1-in-3 branch is overwhelmingly likely to have been taken.
+    const ROLLS: usize = 200;
+
+    /// A world-less dragon already circling, which is the state `try_hand_off` runs in.
+    fn holding_dragon() -> EnderDragonEntity {
+        let dragon = build_dragon(DVec3::ZERO, Weak::new());
+        dragon
+            .phase_manager()
+            .set_phase(&dragon, EnderDragonPhase::HoldingPattern);
+        dragon
+    }
+
+    /// `try_hand_off` is the branchiest code in the phase and is unreachable in play
+    /// today, because only `EnderDragonFight` puts a dragon into the holding pattern and
+    /// that fight is not ported. Driving it directly is the only coverage available.
+    ///
+    /// The roll is random, so the assertion is on the invariant rather than an outcome:
+    /// a hand-off always lands on `LandingApproach`, and staying put always leaves the
+    /// phase alone.
+    #[test]
+    fn a_hand_off_either_lands_or_leaves_the_phase_untouched() {
+        let world = test_world();
+        let mut handed_off = 0_usize;
+
+        for _ in 0..ROLLS {
+            let dragon = holding_dragon();
+
+            if DragonHoldingPatternPhase::try_hand_off(&dragon, world) {
+                handed_off += 1;
+                assert_eq!(
+                    dragon.phase_manager().current_phase(),
+                    EnderDragonPhase::LandingApproach,
+                    "a hand-off must leave the dragon on the landing approach"
+                );
+            } else {
+                assert_eq!(
+                    dragon.phase_manager().current_phase(),
+                    EnderDragonPhase::HoldingPattern,
+                    "declining to hand off must not move the dragon"
+                );
+            }
+        }
+
+        assert!(
+            handed_off > 0,
+            "the 1-in-3 landing roll never fired across {ROLLS} attempts"
+        );
+        assert!(
+            handed_off < ROLLS,
+            "the landing roll fired every time, so the roll is not random"
+        );
+    }
+
+    /// With nobody in the world, `nearest_player` finds no one and the strafe branch is
+    /// unreachable, so the only two outcomes are landing or staying put.
+    #[test]
+    fn an_empty_world_never_strafes() {
+        let world = test_world();
+
+        for _ in 0..ROLLS {
+            let dragon = holding_dragon();
+            DragonHoldingPatternPhase::try_hand_off(&dragon, world);
+
+            assert_ne!(
+                dragon.phase_manager().current_phase(),
+                EnderDragonPhase::StrafePlayer,
+                "there is no player to strafe"
+            );
+        }
     }
 }

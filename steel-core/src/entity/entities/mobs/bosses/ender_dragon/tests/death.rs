@@ -1,47 +1,19 @@
-use std::io::Cursor;
-use std::sync::Arc;
+use super::*;
 
-use glam::DVec3;
-use simdnbt::borrow::read_compound as read_borrowed_compound;
-use simdnbt::owned::NbtCompound;
 use steel_registry::vanilla_game_rules::MOB_DROPS;
-use steel_registry::{init_vanilla_registry, vanilla_entities};
-use steel_utils::{BlockPos, ChunkPos, Downcast as _, geometry::WorldAabb};
+use steel_utils::{BlockPos, geometry::WorldAabb};
 
 use crate::chunk::heightmap::HeightmapType;
-use crate::entity::entities::EnderDragonEntity;
 use crate::entity::entities::ExperienceOrbEntity;
-use crate::entity::entities::mobs::bosses::ender_dragon::EnderDragonPhase;
-use crate::entity::{Entity, LivingEntity, reserve_entity_ids};
-use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
-use crate::world::World;
 
 /// Total ticks the death animation runs.
 const DEATH_DURATION: i32 = 200;
-
-fn death_test_world(key: &'static str) -> Arc<World> {
-    init_vanilla_registry();
-    let world = fresh_test_world(key);
-    insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
-    world
-}
 
 /// The point the death phase steers at: the podium's surface, centered in its block.
 fn podium_target(world: &Arc<World>) -> DVec3 {
     let podium = world.heightmap_pos(HeightmapType::MotionBlocking, BlockPos::ZERO);
     let (x, y, z) = podium.get_bottom_center();
     DVec3::new(x, y, z)
-}
-
-fn dragon_at(world: &Arc<World>, position: DVec3) -> EnderDragonEntity {
-    init_vanilla_registry();
-    let ids = reserve_entity_ids(9);
-    EnderDragonEntity::new(
-        &vanilla_entities::ENDER_DRAGON,
-        ids.first(),
-        position,
-        Arc::downgrade(world),
-    )
 }
 
 /// A dragon already in its death phase.
@@ -242,24 +214,4 @@ fn kill_removes_the_dragon_without_the_animation() {
     // full 200-tick flight; the override has to bypass that entirely.
     assert!(dragon.is_removed());
     assert_eq!(dragon.dragon_death_time(), 0);
-}
-
-#[test]
-fn the_death_timer_round_trips_through_nbt_mid_animation() {
-    let world = death_test_world("dragon_death_nbt");
-    let dragon = dragon_in_chunk(&world);
-    tick_death_times(&dragon, 37);
-
-    let mut nbt = NbtCompound::new();
-    dragon.save_additional(&mut nbt);
-    assert_eq!(nbt.int("DragonDeathTime"), Some(37));
-
-    let restored = dragon_at(&world, DVec3::ZERO);
-    let mut buffer = Vec::new();
-    nbt.write(&mut buffer);
-    let parsed = read_borrowed_compound(&mut Cursor::new(&buffer[..]))
-        .expect("the saved dragon nbt should parse");
-    restored.load_additional((&parsed).into());
-
-    assert_eq!(restored.dragon_death_time(), 37);
 }

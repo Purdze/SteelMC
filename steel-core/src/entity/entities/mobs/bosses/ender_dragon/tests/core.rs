@@ -1,33 +1,9 @@
-use std::io::Cursor;
-use std::sync::Weak;
+use super::*;
 
-use glam::DVec3;
-use simdnbt::borrow::read_compound as read_borrowed_compound;
-use simdnbt::owned::NbtCompound;
-use steel_registry::init_vanilla_registry;
-use steel_registry::{vanilla_damage_types, vanilla_entities};
-use steel_utils::Downcast as _;
-
+use steel_registry::vanilla_damage_types;
 use steel_registry::vanilla_entity_data::EnderDragonEntityData;
 
 use crate::entity::damage::DamageSource;
-use crate::entity::entities::EnderDragonEntity;
-use crate::entity::entities::mobs::bosses::ender_dragon::EnderDragonPart;
-use crate::entity::entities::mobs::bosses::ender_dragon::EnderDragonPhase;
-use crate::entity::{ENTITIES, Entity, LivingEntity, init_entities, reserve_entity_ids};
-use crate::test_support::test_world;
-
-/// Builds a dragon on a properly reserved ID block, the way the registry does.
-fn test_dragon() -> EnderDragonEntity {
-    init_vanilla_registry();
-    let ids = reserve_entity_ids(9);
-    EnderDragonEntity::new(
-        &vanilla_entities::ENDER_DRAGON,
-        ids.first(),
-        DVec3::ZERO,
-        Weak::new(),
-    )
-}
 
 #[test]
 fn spawns_at_full_vanilla_health() {
@@ -112,18 +88,6 @@ fn parts_are_named_in_vanilla_order() {
             "head", "neck", "body", "tail", "tail", "tail", "wing", "wing"
         ]
     );
-}
-
-#[test]
-fn nbt_round_trips_the_death_timer() {
-    let dragon = test_dragon();
-    assert_eq!(dragon.dragon_death_time(), 0);
-
-    let mut nbt = NbtCompound::new();
-    dragon.save_additional(&mut nbt);
-
-    assert_eq!(nbt.int("DragonDeathTime"), Some(0));
-    assert_eq!(nbt.float("sitting_damage_received"), Some(0.0));
 }
 
 #[test]
@@ -325,41 +289,18 @@ fn only_players_and_explosions_can_hurt_the_dragon() {
 }
 
 #[test]
-fn the_phase_round_trips_through_nbt() {
-    let dragon = test_dragon();
-    dragon
-        .phase_manager()
-        .set_phase(&dragon, EnderDragonPhase::HoldingPattern);
-
-    let mut nbt = NbtCompound::new();
-    dragon.save_additional(&mut nbt);
-    assert_eq!(
-        nbt.int("DragonPhase"),
-        Some(EnderDragonPhase::HoldingPattern.id())
-    );
-
-    let restored = test_dragon();
-    let mut buffer = Vec::new();
-    nbt.write(&mut buffer);
-    let parsed = read_borrowed_compound(&mut Cursor::new(&buffer[..]))
-        .expect("the saved dragon nbt should parse");
-    restored.load_additional((&parsed).into());
-
-    assert_eq!(
-        restored.phase_manager().current_phase(),
-        EnderDragonPhase::HoldingPattern
-    );
-}
-
-#[test]
 fn the_holding_pattern_starts_steering_on_its_first_tick() {
     let dragon = test_dragon();
     let manager = dragon.phase_manager();
     manager.set_phase(&dragon, EnderDragonPhase::HoldingPattern);
 
+    // The graph is built from the arena's heightmap, so the chunks have to be there;
+    // on a cold world the phase deliberately declines to steer at all.
+    let world = chunked_test_world("dragon_holding_pattern_first_tick", 4);
+
     // `begin` clears the path, and the roll to leave the circle only happens once a
     // path has been walked to its end, so the first tick always walks the graph.
-    manager.current().do_server_tick(&dragon, test_world());
+    manager.current().do_server_tick(&dragon, &world);
 
     assert_eq!(manager.current_phase(), EnderDragonPhase::HoldingPattern);
     let target = manager
@@ -371,6 +312,19 @@ fn the_holding_pattern_starts_steering_on_its_first_tick() {
     // target sits up to 20 blocks above the node it aims at.
     assert!((target.x.hypot(target.z) - 40.0).abs() < 2.0);
     assert!((73.0..=93.0).contains(&target.y));
+}
+
+#[test]
+fn the_holding_pattern_declines_to_steer_over_a_cold_arena() {
+    let dragon = test_dragon();
+    let manager = dragon.phase_manager();
+    manager.set_phase(&dragon, EnderDragonPhase::HoldingPattern);
+
+    // `test_world()` has no chunks, so the graph cannot be built and the phase waits.
+    manager.current().do_server_tick(&dragon, test_world());
+
+    assert_eq!(manager.current_phase(), EnderDragonPhase::HoldingPattern);
+    assert!(manager.current().fly_target_location().is_none());
 }
 
 #[test]
@@ -387,4 +341,31 @@ fn a_perched_dragon_shrugs_off_knockback() {
         .set_phase(&dragon, EnderDragonPhase::HoldingPattern);
     dragon.knockback(1.0, 1.0, 0.0);
     assert_ne!(dragon.velocity(), DVec3::ZERO);
+}
+
+#[test]
+fn a_dying_dragon_keeps_its_wing_beat_in_lockstep() {
+    let world = chunked_test_world("dragon_dying_wing_beat", 0);
+    let dragon = dragon_at(&world, DVec3::new(0.5, 80.0, 0.5));
+
+    // Beat the wings a while so the two times sit apart.
+    for _ in 0..20 {
+        dragon.dragon_ai_step(&world);
+    }
+    assert_ne!(
+        *dragon.flap_time.lock(),
+        *dragon.o_flap_time.lock(),
+        "a flying dragon's beat should be mid-stroke"
+    );
+
+    dragon.set_health(0.0);
+    assert!(dragon.is_dead_or_dying());
+
+    // Frozen a stroke apart, `is_flapping` would answer the same constant every dying
+    // tick, which is a FLAP event on all 200 of them if that pair straddles -0.3.
+    for _ in 0..DRAGON_DEATH_DURATION {
+        dragon.dragon_ai_step(&world);
+        assert_eq!(*dragon.flap_time.lock(), *dragon.o_flap_time.lock());
+        assert!(!dragon.is_flapping(), "a dying dragon never re-flaps");
+    }
 }

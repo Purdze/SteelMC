@@ -1,50 +1,21 @@
-use std::sync::Arc;
-use std::sync::Weak;
+use super::*;
 
-use glam::DVec3;
 use steel_registry::blocks::BlockRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
+use steel_registry::vanilla_blocks;
 use steel_registry::vanilla_game_rules::MOB_GRIEFING;
-use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_entities};
 use steel_utils::types::UpdateFlags;
-use steel_utils::{BlockPos, ChunkPos, geometry::WorldAabb};
 
 use crate::behavior::init_behaviors;
 use crate::block_entity::init_block_entities;
-use crate::entity::entities::EnderDragonEntity;
-use crate::entity::entities::mobs::bosses::ender_dragon::{
-    EnderDragonPhase, REPEAT_ATTACK_GRACE_TICKS,
-};
-use crate::entity::{ENTITIES, SharedEntity, init_entities, reserve_entity_ids};
-use crate::test_support::{fresh_test_world, insert_ready_full_chunk, test_world};
-use crate::world::World;
+use crate::entity::SharedEntity;
 
-/// A dragon at the origin facing yaw 0, with a zeroed flight history.
-///
-/// The history starts zeroed, so every sample the geometry reads is `(0, 0)` without
-/// any setup, which is what makes the offsets below exact rather than approximate.
-fn origin_dragon() -> EnderDragonEntity {
-    init_vanilla_registry();
-    let ids = reserve_entity_ids(9);
-    EnderDragonEntity::new(
-        &vanilla_entities::ENDER_DRAGON,
-        ids.first(),
-        DVec3::ZERO,
-        Weak::new(),
-    )
-}
-
+/// A world with a 3x3 block of chunks and the block/behavior registries live, which
+/// the wall scans need in order to actually break anything.
 fn walls_test_world(key: &'static str) -> Arc<World> {
-    init_vanilla_registry();
     init_behaviors();
     init_block_entities();
-    let world = fresh_test_world(key);
-    for x in -1..=1 {
-        for z in -1..=1 {
-            insert_ready_full_chunk(&world, ChunkPos::new(x, z));
-        }
-    }
-    world
+    chunked_test_world(key, 1)
 }
 
 /// The single block every wall-scan test places and scans.
@@ -80,7 +51,7 @@ fn health(entity: &SharedEntity) -> f32 {
 
 #[test]
 fn parts_sit_at_their_vanilla_offsets() {
-    let dragon = origin_dragon();
+    let dragon = test_dragon();
 
     dragon.tick_parts(test_world());
 
@@ -109,7 +80,7 @@ fn parts_sit_at_their_vanilla_offsets() {
 
 #[test]
 fn a_flying_dragon_lifts_its_head() {
-    let dragon = origin_dragon();
+    let dragon = test_dragon();
     dragon
         .phase_manager()
         .set_phase(&dragon, EnderDragonPhase::HoldingPattern);

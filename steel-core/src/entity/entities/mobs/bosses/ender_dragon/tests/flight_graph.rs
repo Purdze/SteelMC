@@ -1,11 +1,11 @@
-use glam::DVec3;
+use super::*;
+
+use std::sync::OnceLock;
 
 use crate::entity::ai::node::Node;
-use crate::entity::entities::mobs::bosses::ender_dragon::DragonFlightGraph;
 use crate::entity::entities::mobs::bosses::ender_dragon::flight_graph::{
     NODE_COUNT, OUTER_RING_NODES,
 };
-use crate::test_support::test_world;
 
 /// A fight with at least one crystal alive, which opens the whole graph.
 const WITH_CRYSTALS: Option<i32> = Some(1);
@@ -15,11 +15,24 @@ const NO_FIGHT: Option<i32> = None;
 /// First index of the radius-20 ring. Private to the graph, so restated here.
 const INNER_RING_START: usize = 20;
 
+/// A world with chunks out past the radius-60 outer ring, built once and shared.
+fn graph_test_world() -> &'static Arc<World> {
+    static WORLD: OnceLock<Arc<World>> = OnceLock::new();
+    WORLD.get_or_init(|| chunked_test_world("dragon_flight_graph", 4))
+}
+
 fn test_graph() -> DragonFlightGraph {
-    // The test world has no chunks, so every heightmap lookup falls through to the
-    // world floor and each node clamps to the shared minimum height. That is exactly
-    // what makes the ring geometry below deterministic.
-    DragonFlightGraph::build(test_world())
+    // The chunks are empty, so every heightmap lookup sits on the world floor and each
+    // node clamps to the shared minimum height. That is what makes the ring geometry
+    // below deterministic; the chunks only need to exist so the build does not refuse.
+    DragonFlightGraph::try_build(graph_test_world()).expect("the arena chunks are loaded")
+}
+
+#[test]
+fn a_cold_arena_refuses_to_build_a_graph() {
+    // The caller caches the graph for the dragon's whole life, so a build off the world
+    // floor would pin all 24 nodes to the minimum height permanently.
+    assert!(DragonFlightGraph::try_build(test_world()).is_none());
 }
 
 #[test]

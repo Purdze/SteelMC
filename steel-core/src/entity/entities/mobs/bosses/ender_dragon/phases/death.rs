@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use glam::DVec3;
+use steel_utils::BlockPos;
 use steel_utils::locks::SyncMutex;
 
 use super::navigation::{MAX_TARGET_DISTANCE_SQR, MIN_TARGET_DISTANCE_SQR};
@@ -34,15 +35,18 @@ impl DragonDeathPhase {
     }
 
     /// Resolves the point above the exit portal that the dragon dies on.
-    fn podium_target(dragon: &EnderDragonEntity, world: &World) -> DVec3 {
+    ///
+    /// `None` while the podium's chunk is not loaded. The result is latched for the
+    /// whole death flight, and [`World::heightmap_pos`] would answer with the world
+    /// floor rather than failing, which in the End would send the dragon down to y 0 to
+    /// die instead of onto the portal.
+    fn podium_target(dragon: &EnderDragonEntity, world: &World) -> Option<DVec3> {
         // `MotionBlocking` is the odd one out: every other dragon phase resolves ground
         // level with `MotionBlockingNoLeaves`. Vanilla really does differ here.
-        let podium = world.heightmap_pos(
-            HeightmapType::MotionBlocking,
-            end_podium_location(dragon.fight_origin()),
-        );
-        let (x, y, z) = podium.get_bottom_center();
-        DVec3::new(x, y, z)
+        let podium = end_podium_location(dragon.fight_origin());
+        let y = world.height_at(HeightmapType::MotionBlocking, podium.x(), podium.z())?;
+        let (x, y, z) = BlockPos::new(podium.x(), y, podium.z()).get_bottom_center();
+        Some(DVec3::new(x, y, z))
     }
 }
 
@@ -58,10 +62,18 @@ impl DragonPhaseInstance for DragonDeathPhase {
     }
 
     fn do_server_tick(&self, dragon: &EnderDragonEntity, world: &Arc<World>) {
-        let target = *self
-            .target_location
-            .lock()
-            .get_or_insert_with(|| Self::podium_target(dragon, world));
+        // Not `get_or_insert_with`: a target resolved off a cold chunk must not be
+        // latched, so leave the slot empty and resolve again next tick.
+        let target = {
+            let mut latched = self.target_location.lock();
+            if latched.is_none() {
+                *latched = Self::podium_target(dragon, world);
+            }
+            match *latched {
+                Some(target) => target,
+                None => return,
+            }
+        };
 
         let distance = target.distance_squared(dragon.position());
         let arrived = distance < MIN_TARGET_DISTANCE_SQR

@@ -12,6 +12,7 @@ use super::{
 };
 use steel_registry::vanilla_custom_stats;
 use steel_utils::threading::{available_worker_threads, worker_threads_for_available};
+use steel_utils::translations;
 
 impl Server {
     pub(super) fn advance_server_tick(&self) -> (u64, bool) {
@@ -91,7 +92,10 @@ impl Server {
 
         let players = self.get_players();
         for player in &players {
-            player.close_connection();
+            // Claim the removal first so a later tick cannot run the ordinary disconnect
+            // path for the same player and award the leave-game stat twice.
+            let _ = self.reserve_player_disconnect(player);
+            player.disconnect(translations::MULTIPLAYER_DISCONNECT_SERVER_SHUTDOWN.msg());
             assert_eq!(
                 player.remove_all_menus(),
                 MenuRemovalStatus::Complete,

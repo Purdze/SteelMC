@@ -94,8 +94,8 @@ use text_components::{
 use text_components::{content::Resolvable, custom::CustomData};
 
 use crate::behavior::{
-    BlockStateBehaviorExt as _, ITEM_BEHAVIORS, InteractionResult, ItemBehavior,
-    apply_use_remainder,
+    BlockStateBehaviorExt as _, ITEM_BEHAVIORS, InteractionResult, InventoryTickContext,
+    ItemBehavior, apply_use_remainder,
 };
 use crate::chunk::chunk_request::{ChunkRequestHandle, ChunkRequestState};
 use crate::config::RuntimeConfig;
@@ -728,7 +728,7 @@ impl Player {
 
             self.update_player_attributes();
             self.living_base.refresh_speed_from_attributes();
-            self.tick_regeneration();
+            self.tick_food_data();
 
             if self.is_sprinting() && !self.food_data.lock().has_enough_food() {
                 self.set_sprinting(false);
@@ -1568,10 +1568,6 @@ impl Entity for Player {
         !self.is_removed() && self.get_health() > 0.0
     }
 
-    fn forces_fall_flying_velocity_sync(&self) -> bool {
-        self.is_fall_flying()
-    }
-
     fn blocks_building(&self) -> bool {
         true
     }
@@ -1918,6 +1914,17 @@ impl LivingEntity for Player {
         Player::die(self, source);
     }
 
+    fn tick_equipment(&self) {
+        // skip main hand because its already being ticked through player inventory
+        InventoryTickContext::tick_equipment(
+            &self.get_world(),
+            self,
+            EquipmentSlot::ALL
+                .into_iter()
+                .filter(|slot| *slot != EquipmentSlot::MainHand),
+        );
+    }
+
     fn with_equipment_slot(&self, slot: EquipmentSlot, visitor: &mut dyn FnMut(&ItemStack)) {
         let inventory = self.inventory.lock();
         visitor(inventory.get_ref(slot));
@@ -2074,6 +2081,8 @@ impl LivingEntity for Player {
     }
 
     fn ai_step(&self) -> Option<MoveResult> {
+        self.tick_regeneration();
+        InventoryTickContext::tick_player_inventory(&self.get_world(), self);
         if self.is_flying() && !self.is_passenger() {
             self.reset_fall_distance();
         }

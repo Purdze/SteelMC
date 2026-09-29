@@ -541,20 +541,10 @@ impl ChunkStorage {
         }
     }
 
-    /// Saves a chunk to the appropriate region.
-    ///
-    /// The chunk is serialized, compressed, and written to disk immediately.
-    /// If the region was already open (has loaded chunks), the header update is
-    /// deferred. If this call opened the region, it will be closed after saving.
-    ///
-    /// If the chunk is not dirty and `force` is false, this is a no-op.
-    /// Returns `Ok(true)` if the chunk was saved.
     /// Prepares chunk data and its authoritative persisted status for saving.
-    /// Call this during the holder's snapshot-preparation phase, then pass the result to
-    /// `save_chunk_data` after ending that phase.
+    /// Call during the holder's snapshot-preparation phase; end it before `save_chunk_data`.
     ///
-    /// Returns `None` when there is nothing to write, or when a revival promoted the chunk after
-    /// `status` was captured; callers then leave the chunk dirty for a later save.
+    /// Returns `None` if nothing needs saving or promotion invalidated `status`; retry later.
     ///
     /// # Panics
     ///
@@ -652,7 +642,6 @@ impl ChunkStorage {
             // Proto ticks are pending, so Vanilla ignores the current game
             // time when serializing their already-relative delays.
             let Some(snapshot) = chunk.scheduled_ticks.snapshot(0) else {
-                // Promotion to Full closes the proto container.
                 tracing::debug!(
                     chunk = ?pos,
                     "Abandoning chunk save preparation: the proto scheduled-tick container was \

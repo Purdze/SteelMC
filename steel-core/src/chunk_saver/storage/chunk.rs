@@ -263,9 +263,6 @@ impl ChunkStorage {
     }
 
     /// Converts a runtime section to persistent format.
-    ///
-    /// `Building` sections are finalized under the same write guard that serializes them, since
-    /// worldgen re-enters `Building` on every column write.
     pub(super) fn section_to_persistent(
         section: &SectionHolder,
         builder: &mut ChunkBuilder,

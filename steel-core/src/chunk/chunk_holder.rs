@@ -221,9 +221,8 @@ impl Drop for ChunkSaveDependency {
 
 /// Reservation of a holder's save-preparation phase.
 ///
-/// It excludes a second preparation but not a ticket revival; [`Self::finish`] hands the snapshot
-/// back only if the phase still owned the holder. One guard exists per holder: it keeps a strong
-/// reference, and `ChunkMap::process_unloads` only saves a holder whose strong count is 1.
+/// [`Self::finish`] discards the snapshot if revival won. Its strong reference prevents a second
+/// preparation: `ChunkMap::process_unloads` requires a holder's strong count to be 1.
 pub(crate) struct ChunkSavePreparationGuard {
     holder: Arc<ChunkHolder>,
     /// Whether the lifecycle was already handed back, so `Drop` does not repeat it.
@@ -739,11 +738,9 @@ impl ChunkHolder {
             .is_ok()
     }
 
-    /// Reactivates an unloading holder even while a save snapshot is in flight, as vanilla's
-    /// `ChunkMap.updateChunkScheduling` does via `pendingUnloads`. It cannot fail: a ticketed
-    /// position without a holder in `ChunkMap::chunks` breaks `ChunkGenerationTask::new`. A single
-    /// `try_update` covers both source states, since a finishing preparation moves `PREPARING` back
-    /// to `UNLOADING` between sequential CAS attempts.
+    /// Reactivates an unloading holder even while a save snapshot is in flight.
+    /// A single `try_update` handles preparation finishing concurrently, which could make
+    /// separate CAS attempts for `PREPARING` and `UNLOADING` both fail.
     pub(crate) fn revive_from_unloading(&self) {
         let previous =
             self.save_lifecycle

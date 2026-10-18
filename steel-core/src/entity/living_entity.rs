@@ -3173,8 +3173,8 @@ fn death_loot_items_with_rng<R: rand::Rng, E: LivingEntity + ?Sized>(
     killed_by_player: bool,
     rng: &mut R,
 ) -> Vec<ItemStack> {
-    let causing_entity = source.causing_entity();
-    let direct_entity = source.direct_entity();
+    let causing_entity = source.causing_entity().map(AsRef::as_ref);
+    let direct_entity = source.direct_entity().map(AsRef::as_ref);
     let last_damage_player = if killed_by_player {
         entity.living_base().last_hurt_by_player(world)
     } else {
@@ -3182,13 +3182,11 @@ fn death_loot_items_with_rng<R: rand::Rng, E: LivingEntity + ?Sized>(
     };
 
     let position = entity.position();
-    let causing_entity = causing_entity.map(AsRef::as_ref);
-    let direct_entity = direct_entity.map(AsRef::as_ref);
     let this_equipment = living_loot_equipment(entity);
     let causing_equipment = causing_entity.and_then(loot_equipment);
     let direct_equipment = direct_entity.and_then(loot_equipment);
     let last_damage_player_equipment = last_damage_player.as_deref().and_then(loot_equipment);
-    let this_entity = living_entity_loot_ref(entity, &this_equipment);
+    let this_entity = entity_loot_ref(entity.as_entity_event_source(), Some(&this_equipment));
     let causing_entity =
         causing_entity.map(|causing| entity_loot_ref(causing, causing_equipment.as_ref()));
     let direct_entity =
@@ -3221,30 +3219,6 @@ fn death_loot_items_with_rng<R: rand::Rng, E: LivingEntity + ?Sized>(
     loot_table.get_random_items(&mut context)
 }
 
-/// create an entity reference that can be used inside a lootTable as a source
-pub fn living_entity_loot_ref<'a, E: LivingEntity + ?Sized>(
-    entity: &'a E,
-    equipment: &'a EntityEquipmentSlots,
-) -> EntityRef<'a> {
-    let sheep = entity.sheep_loot_state();
-    EntityRef {
-        entity_type: Some(&entity.entity_type().key),
-        flags: EntityRefFlags {
-            is_on_fire: entity.is_on_fire(),
-            is_sneaking: entity.is_crouching(),
-            is_sprinting: entity.is_sprinting(),
-            is_swimming: entity.is_swimming(),
-            is_baby: entity.is_baby(),
-        },
-        equipment: Some(EntityEquipmentRef::new(equipment)),
-        // TODO: Include custom name once loot contexts can snapshot entity data.
-        custom_name: None,
-        sheep_color: sheep.map(|(color, _)| color),
-        sheep_sheared: sheep.map(|(_, sheared)| sheared),
-        chicken_variant: entity.chicken_loot_variant(),
-    }
-}
-
 /// Runs vanilla `LivingEntity.dropFromShearingLootTable` for `loot_table`, returning the
 /// drops resolved with the vanilla shearing loot params (origin, entity, tool).
 pub(crate) fn shearing_loot_items_with_rng<R: rand::Rng, E: LivingEntity + ?Sized>(
@@ -3257,7 +3231,10 @@ pub(crate) fn shearing_loot_items_with_rng<R: rand::Rng, E: LivingEntity + ?Size
     let equipment = living_loot_equipment(entity);
     let mut context = LootContext::new(rng)
         .with_origin(position.x, position.y, position.z)
-        .with_this_entity(living_entity_loot_ref(entity, &equipment))
+        .with_this_entity(entity_loot_ref(
+            entity.as_entity_event_source(),
+            Some(&equipment),
+        ))
         .with_tool(tool);
     if let Some(level) = entity.level() {
         context = context.with_game_time(level.game_time());

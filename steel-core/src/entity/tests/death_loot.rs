@@ -13,7 +13,10 @@ fn death_loot_world(key: &'static str) -> TestWorld {
     init_vanilla_registry();
     init_behaviors();
     let world_fixture = fresh_test_world(key);
-    insert_ready_full_chunk(&world_fixture.world, ChunkPos::from_entity_pos(PIG_POSITION));
+    insert_ready_full_chunk(
+        &world_fixture.world,
+        ChunkPos::from_entity_pos(PIG_POSITION),
+    );
     world_fixture
 }
 

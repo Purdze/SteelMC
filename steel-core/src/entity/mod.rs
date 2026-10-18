@@ -831,7 +831,7 @@ pub use living_base::{
     LivingRotationState, LivingSwingState, LivingTravelInput, MobEffectInstance,
     MobEffectSyncChange, MobEffectSyncPacket,
 };
-pub use living_entity::{LivingEntity, living_entity_loot_ref};
+pub use living_entity::LivingEntity;
 pub use manager::{
     AddEntityError, ChunkEntityLoadResult, EntityLifecycleChanges, EntityMoveError,
     EntityMoveUpdate, EntityOwnership, EntityVisibility, WorldEntityManager,
@@ -1362,16 +1362,13 @@ fn remove_after_changing_dimensions(entity: &dyn Entity) {
     }
 }
 
-/// Clones every equipment slot of `entity` (vanilla `LivingEntity.getItemBySlot`) so loot
-/// predicates can read it without holding the equipment lock while the table rolls.
+/// Clones every equipment slot of `entity` so loot predicates can read it without holding
+/// the equipment lock while the table rolls.
 ///
 /// Locks the entity's equipment (a player's inventory), so callers must not already hold it.
 pub(crate) fn living_loot_equipment<E: LivingEntity + ?Sized>(entity: &E) -> EntityEquipmentSlots {
-    EquipmentSlot::ALL.map(|slot| {
-        let mut item_stack = ItemStack::empty();
-        entity.with_equipment_slot(slot, &mut |item| item_stack = item.clone());
-        item_stack
-    })
+    // TODO: Read live equipment once loot contexts can do so safely.
+    entity.living_base().equipment().lock().snapshot()
 }
 
 /// [`living_loot_equipment`] for any entity; `None` for non-living entities.

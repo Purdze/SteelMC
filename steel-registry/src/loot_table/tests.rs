@@ -445,6 +445,42 @@ fn random_chance_with_enchanted_bonus_reads_attacker_not_tool() {
 }
 
 #[test]
+fn equipment_enchantment_level_ignores_empty_stacks() {
+    init_test_registries();
+    let mut empty_sword = enchanted_item(&vanilla_items::DIAMOND_SWORD, "looting", 3);
+    empty_sword.count = 0;
+    let equipment = equipment_with(EquipmentSlot::MainHand, empty_sword);
+
+    assert_eq!(
+        EntityEquipmentRef::new(&equipment)
+            .get_enchantment_level(&Identifier::vanilla_static("looting")),
+        0
+    );
+}
+
+#[test]
+fn enchanted_count_increase_rounds_like_java_math_round() {
+    init_test_registries();
+    let function = LootFunction::EnchantedCountIncrease {
+        enchantment: Identifier::vanilla_static("looting"),
+        count: NumberProvider::Constant(-0.5),
+        limit: 0,
+    };
+    let player_key = Identifier::vanilla_static("player");
+    let sword = enchanted_item(&vanilla_items::DIAMOND_SWORD, "looting", 1);
+    let equipment = equipment_with(EquipmentSlot::MainHand, sword);
+    let mut item = ItemStack::with_count(&vanilla_items::PORKCHOP, 2);
+
+    let mut rng = test_rng();
+    let mut ctx =
+        LootContext::new(&mut rng).with_killer_entity(living_entity_ref(&player_key, &equipment));
+    function.apply(&mut item, &mut ctx);
+
+    // Java `Math.round(-0.5f)` is 0, where Rust's `f32::round` gives -1.
+    assert_eq!(item.count, 2);
+}
+
+#[test]
 fn test_uniform_get_int_reaches_inclusive_max() {
     // Vanilla UniformGenerator.getInt uses Mth.nextInt(rand, min, max), which
     // samples the integer range inclusively; a uniform 1..3 count must yield 3.

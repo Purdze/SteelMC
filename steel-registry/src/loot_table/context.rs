@@ -109,6 +109,12 @@ impl NumberProvider {
         }
     }
 
+    /// Get a value using the loot context's RNG and parameters.
+    pub fn get_float<R: rand::Rng>(&self, ctx: &mut LootContext<'_, R>) -> f32 {
+        let ctx_ref = LootContextRef { tool: ctx.tool };
+        self.get(ctx.rng, Some(&ctx_ref))
+    }
+
     /// Get a value without context (for backwards compatibility).
     pub fn get_simple(&self, rng: &mut impl rand::Rng) -> f32 {
         match self {
@@ -150,7 +156,7 @@ impl NumberProvider {
 }
 
 /// `java.lang.Math.round` semantics for a float.
-fn math_round(value: f32) -> i32 {
+pub(crate) fn math_round(value: f32) -> i32 {
     (value + 0.5).floor() as i32
 }
 
@@ -322,13 +328,13 @@ impl<'a> EntityEquipmentRef<'a> {
         Self(slots)
     }
 
-    /// Vanilla `LivingEntity.getItemBySlot`.
+    /// Returns the item in the given equipment slot.
     #[must_use]
     pub const fn get(self, slot: EquipmentSlot) -> &'a ItemStack {
         &self.0[slot.index()]
     }
 
-    /// Vanilla `EnchantmentHelper.getEnchantmentLevel(Holder<Enchantment>, LivingEntity)`.
+    /// Returns the highest enchantment level from matching equipment slots.
     #[must_use]
     pub fn get_enchantment_level(self, enchantment: &Identifier) -> i32 {
         let Some(definition) = REGISTRY.enchantments.by_key(enchantment) else {
@@ -337,7 +343,10 @@ impl<'a> EntityEquipmentRef<'a> {
         EquipmentSlot::ALL
             .into_iter()
             .filter(|slot| definition.matching_slot(*slot))
-            .map(|slot| self.get(slot).get_enchantment_level(enchantment))
+            .filter_map(|slot| {
+                let stack = self.get(slot);
+                (!stack.is_empty()).then(|| stack.get_enchantment_level(enchantment))
+            })
             .max()
             .unwrap_or(0)
     }
@@ -500,8 +509,7 @@ impl<'a, R: rand::Rng> LootContext<'a, R> {
             .map_or(0, |t| t.get_enchantment_level(enchantment))
     }
 
-    /// Get the level of an enchantment on the attacking entity's equipment, as vanilla reads
-    /// `LootContextParams.ATTACKING_ENTITY`.
+    /// Get the level of an enchantment on the attacking entity's equipment.
     #[must_use]
     pub fn get_attacking_entity_enchantment_level(&self, enchantment: &Identifier) -> i32 {
         self.killer_entity

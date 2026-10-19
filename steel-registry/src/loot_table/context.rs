@@ -157,7 +157,7 @@ impl NumberProvider {
 
 /// `java.lang.Math.round` semantics for a float.
 pub(crate) fn math_round(value: f32) -> i32 {
-    (value + 0.5).floor() as i32
+    (f64::from(value) + 0.5).floor() as i32
 }
 
 /// Vanilla `Mth.nextInt(random, min, max)` is inclusive and clamps to `min`
